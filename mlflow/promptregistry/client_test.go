@@ -441,6 +441,133 @@ func TestListPrompts_Success(t *testing.T) {
 	}
 }
 
+func TestListPrompts_WithModelConfig(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"registered_models": []map[string]any{
+				{
+					"name": "prompt-with-model",
+					"latest_versions": []map[string]any{
+						{
+							"version": "2",
+							"tags": []map[string]string{
+								{"key": "_mlflow_prompt_model_config", "value": `{"provider":"openai","model_name":"gpt-4"}`},
+								{"key": "mlflow.prompt.is_prompt", "value": "true"},
+							},
+						},
+					},
+					"tags": []map[string]string{
+						{"key": "mlflow.prompt.is_prompt", "value": "true"},
+					},
+				},
+				{
+					"name": "prompt-without-model",
+					"latest_versions": []map[string]any{
+						{
+							"version": "1",
+							"tags": []map[string]string{
+								{"key": "mlflow.prompt.is_prompt", "value": "true"},
+							},
+						},
+					},
+					"tags": []map[string]string{
+						{"key": "mlflow.prompt.is_prompt", "value": "true"},
+					},
+				},
+			},
+		})
+	}))
+
+	result, err := client.ListPrompts(context.Background())
+	if err != nil {
+		t.Fatalf("ListPrompts() error = %v", err)
+	}
+
+	if len(result.Prompts) != 2 {
+		t.Fatalf("got %d prompts, want 2", len(result.Prompts))
+	}
+
+	// First prompt should have ModelConfig populated
+	p1 := result.Prompts[0]
+	if p1.ModelConfig == nil {
+		t.Fatal("expected ModelConfig to be populated for prompt-with-model")
+	}
+	if p1.ModelConfig.Provider != "openai" {
+		t.Errorf("ModelConfig.Provider = %q, want %q", p1.ModelConfig.Provider, "openai")
+	}
+	if p1.ModelConfig.ModelName != "gpt-4" {
+		t.Errorf("ModelConfig.ModelName = %q, want %q", p1.ModelConfig.ModelName, "gpt-4")
+	}
+
+	// Second prompt should have nil ModelConfig
+	p2 := result.Prompts[1]
+	if p2.ModelConfig != nil {
+		t.Errorf("expected nil ModelConfig for prompt-without-model, got %+v", p2.ModelConfig)
+	}
+}
+
+func TestListPromptVersions_WithModelConfig(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"model_versions": []map[string]any{
+				{
+					"name":    "test-prompt",
+					"version": "2",
+					"tags": []map[string]string{
+						{"key": "_mlflow_prompt_model_config", "value": `{"provider":"anthropic","model_name":"claude-3"}`},
+						{"key": "mlflow.prompt.text", "value": "Hello"},
+						{"key": "author", "value": "bob"},
+					},
+				},
+				{
+					"name":    "test-prompt",
+					"version": "1",
+					"tags": []map[string]string{
+						{"key": "mlflow.prompt.text", "value": "Hi"},
+					},
+				},
+			},
+		})
+	}))
+
+	result, err := client.ListPromptVersions(context.Background(), "test-prompt")
+	if err != nil {
+		t.Fatalf("ListPromptVersions() error = %v", err)
+	}
+
+	if len(result.Versions) != 2 {
+		t.Fatalf("got %d versions, want 2", len(result.Versions))
+	}
+
+	// Version 2 should have ModelConfig
+	v2 := result.Versions[0]
+	if v2.ModelConfig == nil {
+		t.Fatal("expected ModelConfig to be populated for version 2")
+	}
+	if v2.ModelConfig.Provider != "anthropic" {
+		t.Errorf("ModelConfig.Provider = %q, want %q", v2.ModelConfig.Provider, "anthropic")
+	}
+	if v2.ModelConfig.ModelName != "claude-3" {
+		t.Errorf("ModelConfig.ModelName = %q, want %q", v2.ModelConfig.ModelName, "claude-3")
+	}
+	// ModelConfig tag should not leak into user tags
+	if _, ok := v2.Tags["_mlflow_prompt_model_config"]; ok {
+		t.Error("model config tag should not be in user tags")
+	}
+	// Other user tags should still be present
+	if v2.Tags["author"] != "bob" {
+		t.Errorf("Tags[author] = %q, want %q", v2.Tags["author"], "bob")
+	}
+
+	// Version 1 should have nil ModelConfig
+	v1 := result.Versions[1]
+	if v1.ModelConfig != nil {
+		t.Errorf("expected nil ModelConfig for version 1, got %+v", v1.ModelConfig)
+	}
+}
+
 func TestListPrompts_WithNameFilter(t *testing.T) {
 	var receivedFilter string
 
