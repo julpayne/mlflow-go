@@ -76,6 +76,7 @@ Rejected — artifacts are a distinct MLflow domain; a separate sub-client keeps
 
 ### Negative
 
+- `LogArtifact` reads the entire upload into memory via `io.ReadAll` — large files risk uncontrolled memory allocation (streaming deferred)
 - `DownloadArtifact` returns `[]byte` — large files load fully into memory (streaming deferred)
 - Presigned upload requires MLflow 3.12+ server; older servers use proxy fallback only
 - List returns one directory level at a time (matches MLflow REST API behavior)

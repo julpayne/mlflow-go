@@ -42,6 +42,24 @@ func TestResolveStoragePath(t *testing.T) {
 			artifactPath: "model.pkl",
 			wantErr:      true,
 		},
+		{
+			name:         "artifact path escapes run directory",
+			artifactURI:  "mlflow-artifacts:/experiments/1/runs/abc/artifacts",
+			artifactPath: "../outside.txt",
+			wantErr:      true,
+		},
+		{
+			name:         "artifact path traversal via join",
+			artifactURI:  "mlflow-artifacts:/experiments/1/runs/abc/artifacts",
+			artifactPath: "metrics/../../outside.txt",
+			wantErr:      true,
+		},
+		{
+			name:         "malformed base path escapes artifact root",
+			artifactURI:  "mlflow-artifacts:/..",
+			artifactPath: "",
+			wantErr:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -58,6 +76,47 @@ func TestResolveStoragePath(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ResolveStoragePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPresignedStoragePath(t *testing.T) {
+	tests := []struct {
+		name         string
+		artifactURI  string
+		artifactPath string
+		want         string
+		wantErr      bool
+	}{
+		{
+			name:         "s3 uri",
+			artifactURI:  "s3://bucket/experiments/1/runs/abc/artifacts",
+			artifactPath: "metrics.txt",
+			want:         "experiments/1/runs/abc/artifacts/metrics.txt",
+		},
+		{
+			name:         "unsupported scheme",
+			artifactURI:  "ftp://host/path",
+			artifactPath: "file.txt",
+			wantErr:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PresignedStoragePath(tt.artifactURI, tt.artifactPath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PresignedStoragePath() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("PresignedStoragePath() = %q, want %q", got, tt.want)
 			}
 		})
 	}

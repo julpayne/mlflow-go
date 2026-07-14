@@ -111,6 +111,18 @@ def remove_messages(text):
 
 content = remove_messages(content)
 
+forbidden = [
+    'import "issues.proto"',
+    'import "prompt_optimization.proto"',
+    'PromptOptimizationJob',
+    'CreateIssue',
+    'createPromptOptimizationJob',
+]
+for token in forbidden:
+    if token in content:
+        print(f'ERROR: service.proto still contains {token!r} after post-processing', file=sys.stderr)
+        sys.exit(1)
+
 with open(sys.argv[1], 'w') as f:
     f.write(content)
 " "${OUTPUT_DIR}/service.proto"

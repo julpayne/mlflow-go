@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -641,5 +642,20 @@ func TestClient_DoAbsolute_Success(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Errorf("expected empty response body, got %q", string(data))
+	}
+}
+
+func TestReadResponseBody_ExceedsLimit(t *testing.T) {
+	_, err := readResponseBody(strings.NewReader(strings.Repeat("a", maxResponseBodySize+1)))
+	if err == nil {
+		t.Fatal("expected error for oversized body, got nil")
+	}
+}
+
+func TestRedactAbsoluteURLForLog(t *testing.T) {
+	got := redactAbsoluteURLForLog("https://storage.example.com/object?X-Amz-Signature=secret&X-Amz-Credential=abc")
+	want := "https://storage.example.com/object"
+	if got != want {
+		t.Errorf("redactAbsoluteURLForLog() = %q, want %q", got, want)
 	}
 }

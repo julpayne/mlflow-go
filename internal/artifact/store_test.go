@@ -120,6 +120,41 @@ func TestStore_DownloadPresigned(t *testing.T) {
 	}
 }
 
+func TestStore_DownloadCloudPresigned(t *testing.T) {
+	presignedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("cloud-download"))
+	}))
+	t.Cleanup(presignedServer.Close)
+
+	var presignedPath string
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/mlflow-artifacts/presigned/"):
+			presignedPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"url": presignedServer.URL,
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "s3://bucket/experiments/1/runs/abc/artifacts"
+	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if string(data) != "cloud-download" {
+		t.Errorf("data = %q, want cloud-download", string(data))
+	}
+	wantPath := "/api/2.0/mlflow-artifacts/presigned/experiments/1/runs/abc/artifacts/metrics.txt"
+	if presignedPath != wantPath {
+		t.Errorf("presigned path = %q, want %q", presignedPath, wantPath)
+	}
+}
+
 func TestStore_DownloadProxyFallback(t *testing.T) {
 	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

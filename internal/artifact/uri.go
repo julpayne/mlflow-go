@@ -44,20 +44,61 @@ func ResolveStoragePath(artifactURI, artifactPath string) (string, error) {
 		return "", fmt.Errorf("mlflow: artifact URI path is required")
 	}
 
-	if artifactPath == "" {
-		return basePath, nil
-	}
-
 	basePath = path.Clean(basePath)
 	if basePath == "." || basePath == ".." ||
 		path.IsAbs(basePath) || strings.HasPrefix(basePath, "../") {
 		return "", fmt.Errorf("mlflow: artifact URI path escapes the artifact root")
 	}
+
+	if artifactPath == "" {
+		return basePath, nil
+	}
+
 	cleaned := path.Join(basePath, artifactPath)
 	if !strings.HasPrefix(cleaned, basePath+"/") && cleaned != basePath {
 		return "", fmt.Errorf("mlflow: artifact path %q escapes the run artifact directory", artifactPath)
 	}
 	return cleaned, nil
+}
+
+// PresignedStoragePath maps a run artifact URI and relative artifact path to the
+// storage path used by the presigned download API. Proxied URIs use proxy path
+// resolution; cloud URIs derive the object key prefix from the URI path.
+func PresignedStoragePath(artifactURI, artifactPath string) (string, error) {
+	if IsProxied(artifactURI) {
+		return ResolveStoragePath(artifactURI, artifactPath)
+	}
+
+	parsed, err := url.Parse(artifactURI)
+	if err != nil {
+		return "", fmt.Errorf("invalid artifact URI: %w", err)
+	}
+
+	switch parsed.Scheme {
+	case "s3", "gs", "gcs":
+		basePath := strings.TrimPrefix(parsed.Path, "/")
+		if basePath == "" {
+			return "", fmt.Errorf("mlflow: artifact URI path is required")
+		}
+
+		basePath = path.Clean(basePath)
+		if basePath == "." || basePath == ".." ||
+			path.IsAbs(basePath) || strings.HasPrefix(basePath, "../") {
+			return "", fmt.Errorf("mlflow: artifact URI path escapes the artifact root")
+		}
+
+		if artifactPath == "" {
+			return basePath, nil
+		}
+
+		cleaned := path.Join(basePath, artifactPath)
+		if !strings.HasPrefix(cleaned, basePath+"/") && cleaned != basePath {
+			return "", fmt.Errorf("mlflow: artifact path %q escapes the run artifact directory", artifactPath)
+		}
+		return cleaned, nil
+	default:
+		return "", fmt.Errorf("mlflow: unsupported artifact URI scheme %q for presigned download", parsed.Scheme)
+	}
 }
 
 // SupportsTrackingServerArtifacts reports whether artifacts are stored on the

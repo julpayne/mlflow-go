@@ -108,24 +108,32 @@ func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath s
 		return data, nil
 	}
 
+	storagePath, presignedPathErr := PresignedStoragePath(artifactURI, artifactPath)
+	if presignedPathErr == nil {
+		data, err := s.downloadPresigned(ctx, storagePath, opts.Expiration)
+		if err == nil {
+			return data, nil
+		}
+		if !shouldFallbackFromPresigned(err) {
+			return nil, err
+		}
+	} else if !IsProxied(artifactURI) {
+		return nil, fmt.Errorf("failed to download artifact: %w", presignedPathErr)
+	}
+
 	if !IsProxied(artifactURI) {
-		return nil, fmt.Errorf("failed to download artifact: artifact URI %q does not support proxy or tracking-server download", artifactURI)
+		return nil, fmt.Errorf("failed to download artifact: presigned download unavailable for artifact URI %q", artifactURI)
 	}
 
-	storagePath, err := ResolveStoragePath(artifactURI, artifactPath)
-	if err != nil {
-		return nil, err
+	if presignedPathErr != nil {
+		var err error
+		storagePath, err = ResolveStoragePath(artifactURI, artifactPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	data, err := s.downloadPresigned(ctx, storagePath, opts.Expiration)
-	if err == nil {
-		return data, nil
-	}
-	if !shouldFallbackFromPresigned(err) {
-		return nil, err
-	}
-
-	data, _, err = s.transport.GetBytes(ctx, ProxyDownloadPath(storagePath), nil)
+	data, _, err := s.transport.GetBytes(ctx, ProxyDownloadPath(storagePath), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact via proxy: %w", err)
 	}

@@ -16,6 +16,8 @@ import (
 	"github.com/opendatahub-io/mlflow-go/internal/errors"
 )
 
+const maxResponseBodySize = 100 << 20 // 100 MiB
+
 // Client handles HTTP communication with the MLflow API.
 type Client struct {
 	baseURL    *url.URL
@@ -234,9 +236,9 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 		)
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readResponseBody(resp.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to read response: %w", err)
+		return nil, "", err
 	}
 
 	if resp.StatusCode >= 400 {
@@ -265,7 +267,7 @@ func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, hea
 	if c.logger != nil {
 		c.logger.Debug("request",
 			"method", method,
-			"url", absoluteURL,
+			"url", redactAbsoluteURLForLog(absoluteURL),
 		)
 	}
 
@@ -282,9 +284,9 @@ func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, hea
 		)
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readResponseBody(resp.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to read response: %w", err)
+		return nil, "", err
 	}
 
 	if resp.StatusCode >= 400 {
@@ -292,6 +294,28 @@ func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, hea
 	}
 
 	return respBody, resp.Header.Get("Content-Type"), nil
+}
+
+func readResponseBody(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxResponseBodySize+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if int64(len(data)) > maxResponseBodySize {
+		return nil, fmt.Errorf("response body exceeds maximum size of %d bytes", maxResponseBodySize)
+	}
+	return data, nil
+}
+
+func redactAbsoluteURLForLog(absoluteURL string) string {
+	parsed, err := url.Parse(absoluteURL)
+	if err != nil {
+		return absoluteURL
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (c *Client) parseError(statusCode int, body []byte) error {
