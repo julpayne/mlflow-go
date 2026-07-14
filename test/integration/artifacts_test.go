@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -69,9 +70,14 @@ func TestArtifactRoundTrip(t *testing.T) {
 	}
 
 	t.Log("Step 3: Download artifact")
-	downloaded, err := client.Artifacts().DownloadArtifact(ctx, run.Info.RunID, artifactPath)
+	rc, err := client.Artifacts().DownloadArtifact(ctx, run.Info.RunID, artifactPath)
 	if err != nil {
 		t.Fatalf("DownloadArtifact() error = %v", err)
+	}
+	defer rc.Close()
+	downloaded, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
 	}
 	if !bytes.Equal(downloaded, content) {
 		t.Errorf("downloaded content = %q, want %q", string(downloaded), string(content))

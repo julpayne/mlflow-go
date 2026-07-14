@@ -129,12 +129,17 @@ func TestClient_DownloadArtifactProxy(t *testing.T) {
 		}
 	}))
 
-	data, err := client.DownloadArtifact(context.Background(), "run-1", "greeting.txt")
+	rc, err := client.DownloadArtifact(context.Background(), "run-1", "greeting.txt")
 	if err != nil {
 		t.Fatalf("DownloadArtifact() error = %v", err)
 	}
-	if string(data) != "artifact-content" {
-		t.Errorf("data = %q, want artifact-content", string(data))
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(body) != "artifact-content" {
+		t.Errorf("data = %q, want artifact-content", string(body))
 	}
 }
 
@@ -178,5 +183,31 @@ func TestClient_LogArtifact_Validation(t *testing.T) {
 
 	if len(unexpectedRequests) > 0 {
 		t.Errorf("unexpected HTTP requests: %v", unexpectedRequests)
+	}
+}
+
+type byteCountReader struct {
+	remaining int64
+}
+
+func (r *byteCountReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	r.remaining -= n
+	return int(n), nil
+}
+
+func TestReadArtifactContent_ExceedsMaxSize(t *testing.T) {
+	_, err := readArtifactContent(&byteCountReader{remaining: maxArtifactUploadSize + 1})
+	if err == nil {
+		t.Fatal("expected error for oversized artifact content")
+	}
+	if !strings.Contains(err.Error(), "maximum upload size") {
+		t.Errorf("error = %v, want maximum upload size message", err)
 	}
 }

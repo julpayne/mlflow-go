@@ -87,8 +87,9 @@ type DownloadOptions struct {
 	Expiration int64
 }
 
-// Download downloads artifact bytes for a run, preferring presigned URLs when available.
-func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath string, opts DownloadOptions) ([]byte, error) {
+// Download opens an artifact for streaming download, preferring presigned URLs when available.
+// The caller must close the returned ReadCloser.
+func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath string, opts DownloadOptions) (io.ReadCloser, error) {
 	if runID == "" {
 		return nil, fmt.Errorf("mlflow: run ID is required")
 	}
@@ -100,19 +101,19 @@ func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath s
 	}
 
 	if SupportsTrackingServerArtifacts(artifactURI) {
-		data, err := s.downloadViaTrackingServer(ctx, runID, artifactPath)
+		rc, err := s.downloadViaTrackingServer(ctx, runID, artifactPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download artifact via tracking server: %w", err)
 		}
 
-		return data, nil
+		return rc, nil
 	}
 
 	storagePath, presignedPathErr := PresignedStoragePath(artifactURI, artifactPath)
 	if presignedPathErr == nil {
-		data, err := s.downloadPresigned(ctx, storagePath, opts.Expiration)
+		rc, err := s.downloadPresigned(ctx, storagePath, opts.Expiration)
 		if err == nil {
-			return data, nil
+			return rc, nil
 		}
 		if !shouldFallbackFromPresigned(err) {
 			return nil, err
@@ -133,12 +134,12 @@ func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath s
 		}
 	}
 
-	data, _, err := s.transport.GetBytes(ctx, ProxyDownloadPath(storagePath), nil)
+	rc, err := s.transport.GetBody(ctx, ProxyDownloadPath(storagePath), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact via proxy: %w", err)
 	}
 
-	return data, nil
+	return rc, nil
 }
 
 // ArtifactURI loads the artifact URI for a run.
@@ -197,7 +198,7 @@ func (s *Store) uploadPresigned(ctx context.Context, runID, artifactPath string,
 	return nil
 }
 
-func (s *Store) downloadPresigned(ctx context.Context, storagePath string, expiration int64) ([]byte, error) {
+func (s *Store) downloadPresigned(ctx context.Context, storagePath string, expiration int64) (io.ReadCloser, error) {
 	query := url.Values{}
 	if expiration > 0 {
 		query.Set("expiration", fmt.Sprintf("%d", expiration))
@@ -223,12 +224,12 @@ func (s *Store) downloadPresigned(ctx context.Context, storagePath string, expir
 		headers[k] = v
 	}
 
-	data, _, err := s.transport.DoAbsolute(ctx, http.MethodGet, downloadURL, headers, nil)
+	rc, err := s.transport.DoAbsoluteGetBody(ctx, downloadURL, headers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact from presigned URL: %w", err)
 	}
 
-	return data, nil
+	return rc, nil
 }
 
 func (s *Store) uploadViaTrackingServer(ctx context.Context, runID, artifactPath string, content []byte, contentType string) error {
@@ -239,13 +240,12 @@ func (s *Store) uploadViaTrackingServer(ctx context.Context, runID, artifactPath
 	return s.transport.PostBytes(ctx, trackingServerUploadPath, query, content, contentType)
 }
 
-func (s *Store) downloadViaTrackingServer(ctx context.Context, runID, artifactPath string) ([]byte, error) {
+func (s *Store) downloadViaTrackingServer(ctx context.Context, runID, artifactPath string) (io.ReadCloser, error) {
 	query := url.Values{
 		"run_id": []string{runID},
 		"path":   []string{artifactPath},
 	}
-	data, _, err := s.transport.GetBytes(ctx, trackingServerDownloadPath, query)
-	return data, err
+	return s.transport.GetBody(ctx, trackingServerDownloadPath, query)
 }
 
 func shouldFallbackFromPresigned(err error) bool {

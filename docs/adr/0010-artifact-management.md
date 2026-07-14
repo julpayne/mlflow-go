@@ -49,7 +49,8 @@ Excluded (defer): multipart upload, delete, directory upload/download, logged-mo
 
 ### 5. Server requirements
 
-- **Proxy mode (local dev):** `--serve-artifacts`, `--artifacts-destination`, and `--default-artifact-root` pointing to the mlflow-artifacts API route. `make dev/up` and `make test/integration-ci` configure this.
+- **Proxy mode (local dev):** `--serve-artifacts` and `--artifacts-destination`. MLflow assigns `mlflow-artifacts:/` URIs automatically when artifact serving is enabled.
+- **Direct filesystem mode:** `--no-serve-artifacts` with a filesystem `--default-artifact-root` (e.g. `./mlartifacts`); the client falls back to tracking-server upload/download routes.
 - **Presigned mode (cloud):** MLflow 3.12+ with cloud-backed artifact store and server-side credentials. Requires no client cloud credentials.
 
 ## Alternatives Considered
@@ -77,7 +78,7 @@ Rejected — artifacts are a distinct MLflow domain; a separate sub-client keeps
 ### Negative
 
 - `LogArtifact` reads the entire upload into memory via `io.ReadAll` — large files risk uncontrolled memory allocation (streaming deferred)
-- `DownloadArtifact` returns `[]byte` — large files load fully into memory (streaming deferred)
+- `DownloadArtifact` returns `io.ReadCloser` for streaming download; uploads still buffer via `io.ReadAll` (see above)
 - Presigned upload requires MLflow 3.12+ server; older servers use proxy fallback only
 - List returns one directory level at a time (matches MLflow REST API behavior)
 

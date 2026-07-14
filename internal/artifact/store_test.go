@@ -25,6 +25,16 @@ func newTestStore(t *testing.T, handler http.Handler) *Store {
 	return NewStore(tc)
 }
 
+func readDownload(t *testing.T, rc io.ReadCloser) []byte {
+	t.Helper()
+	t.Cleanup(func() { _ = rc.Close() })
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	return data
+}
+
 func TestStore_UploadPresigned(t *testing.T) {
 	presignedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
@@ -111,10 +121,11 @@ func TestStore_DownloadPresigned(t *testing.T) {
 	}))
 
 	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
-	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
+	rc, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
+	data := readDownload(t, rc)
 	if string(data) != "downloaded-bytes" {
 		t.Errorf("data = %q, want downloaded-bytes", string(data))
 	}
@@ -142,10 +153,11 @@ func TestStore_DownloadCloudPresigned(t *testing.T) {
 	}))
 
 	artifactURI := "s3://bucket/experiments/1/runs/abc/artifacts"
-	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
+	rc, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
+	data := readDownload(t, rc)
 	if string(data) != "cloud-download" {
 		t.Errorf("data = %q, want cloud-download", string(data))
 	}
@@ -174,10 +186,11 @@ func TestStore_DownloadProxyFallback(t *testing.T) {
 	}))
 
 	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
-	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
+	rc, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
+	data := readDownload(t, rc)
 	if string(data) != "proxy-download" {
 		t.Errorf("data = %q, want proxy-download", string(data))
 	}
@@ -242,10 +255,11 @@ func TestStore_DownloadTrackingServer(t *testing.T) {
 	}))
 
 	artifactURI := "file:///tmp/mlruns/1/run-1/artifacts"
-	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
+	rc, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
+	data := readDownload(t, rc)
 	if string(data) != "tracking-server-download" {
 		t.Errorf("data = %q, want tracking-server-download", string(data))
 	}

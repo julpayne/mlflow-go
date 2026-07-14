@@ -255,6 +255,7 @@ Upload, list, and download run artifacts via `client.Artifacts()`. `ListArtifact
 ```go
 import (
     "bytes"
+    "io"
     "github.com/opendatahub-io/mlflow-go/mlflow/artifacts"
 )
 
@@ -267,8 +268,13 @@ err := client.Artifacts().LogArtifact(ctx, runID, "metrics/output.txt",
 // List artifacts (optionally filter by path prefix)
 list, err := client.Artifacts().ListArtifacts(ctx, runID, artifacts.WithArtifactPath("metrics"))
 
-// Download an artifact file
-data, err := client.Artifacts().DownloadArtifact(ctx, runID, "metrics/output.txt")
+// Download an artifact file (caller must close the returned reader)
+rc, err := client.Artifacts().DownloadArtifact(ctx, runID, "metrics/output.txt")
+if err != nil {
+    // handle error
+}
+defer rc.Close()
+data, err := io.ReadAll(rc)
 ```
 
 For local development, start MLflow with artifact serving enabled (`make dev/up` configures this automatically):
@@ -276,8 +282,7 @@ For local development, start MLflow with artifact serving enabled (`make dev/up`
 ```bash
 mlflow server \
   --serve-artifacts \
-  --artifacts-destination ./mlartifacts \
-  --default-artifact-root http://localhost:5000/api/2.0/mlflow-artifacts/artifacts/experiments
+  --artifacts-destination ./mlartifacts
 ```
 
 Presigned upload requires MLflow 3.12+ with a cloud-backed artifact store (S3, GCS, etc.).

@@ -98,6 +98,12 @@ func (c *Client) GetBytes(ctx context.Context, path string, query url.Values) ([
 	return c.doRaw(ctx, http.MethodGet, path, query, nil, "", false)
 }
 
+// GetBody performs a GET request and returns the response body for streaming.
+// The caller must close the returned ReadCloser.
+func (c *Client) GetBody(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
+	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false)
+}
+
 // PutBytes performs a PUT request with a raw body and content type.
 func (c *Client) PutBytes(ctx context.Context, path string, body []byte, contentType string) error {
 	_, _, err := c.doRaw(ctx, http.MethodPut, path, nil, body, contentType, false)
@@ -114,6 +120,12 @@ func (c *Client) PostBytes(ctx context.Context, path string, query url.Values, b
 // This is used for presigned artifact upload/download URLs.
 func (c *Client) DoAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {
 	return c.doAbsolute(ctx, method, absoluteURL, headers, body)
+}
+
+// DoAbsoluteGetBody performs a GET to an absolute URL and returns the response body for streaming.
+// The caller must close the returned ReadCloser.
+func (c *Client) DoAbsoluteGetBody(ctx context.Context, absoluteURL string, headers map[string]string) (io.ReadCloser, error) {
+	return c.doAbsoluteBody(ctx, http.MethodGet, absoluteURL, headers)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, result any) error {
@@ -248,6 +260,86 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	return respBody, resp.Header.Get("Content-Type"), nil
 }
 
+func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) (io.ReadCloser, error) {
+	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
+	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if body != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if jsonAccept {
+		req.Header.Set("Accept", "application/json")
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	return c.doRequestBody(req)
+}
+
+func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string, headers map[string]string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, method, absoluteURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", method,
+			"url", redactAbsoluteURLForLog(absoluteURL),
+		)
+	}
+
+	return c.doRequestBody(req)
+}
+
+func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
+	start := time.Now()
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", req.Method,
+			"url", req.URL.String(),
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if c.logger != nil {
+		c.logger.Debug("response",
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+
+	if resp.StatusCode >= 400 {
+		respBody, readErr := readResponseBody(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		return nil, c.parseError(resp.StatusCode, respBody)
+	}
+
+	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
+}
+
 func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -306,6 +398,41 @@ func readResponseBody(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("response body exceeds maximum size of %d bytes", maxResponseBodySize)
 	}
 	return data, nil
+}
+
+type limitedReadCloser struct {
+	r        io.Reader
+	closer   io.Closer
+	limit    int64
+	read     int64
+	exceeded bool
+}
+
+func newLimitedReadCloser(body io.ReadCloser, limit int64) io.ReadCloser {
+	return &limitedReadCloser{
+		r:      io.LimitReader(body, limit+1),
+		closer: body,
+		limit:  limit,
+	}
+}
+
+func (l *limitedReadCloser) Read(p []byte) (int, error) {
+	if l.exceeded {
+		return 0, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
+	}
+
+	n, err := l.r.Read(p)
+	l.read += int64(n)
+	if l.read > l.limit {
+		l.exceeded = true
+		return n, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
+	}
+
+	return n, err
+}
+
+func (l *limitedReadCloser) Close() error {
+	return l.closer.Close()
 }
 
 func redactAbsoluteURLForLog(absoluteURL string) string {

@@ -526,6 +526,35 @@ func TestClient_GetBytes_Success(t *testing.T) {
 	}
 }
 
+func TestClient_GetBody_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		w.Write([]byte("stream-data"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBody(context.Background(), "/api/artifacts/file", nil)
+	if err != nil {
+		t.Fatalf("GetBody() error = %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(data) != "stream-data" {
+		t.Errorf("data = %q, want stream-data", string(data))
+	}
+}
+
 func TestClient_PutBytes_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {

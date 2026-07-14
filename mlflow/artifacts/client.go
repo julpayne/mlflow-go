@@ -11,6 +11,8 @@ import (
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
 )
 
+const maxArtifactUploadSize = 100 << 20 // 100 MiB
+
 // Client provides access to MLflow run artifacts.
 // It is safe for concurrent use.
 type Client struct {
@@ -71,9 +73,9 @@ func (c *Client) LogArtifact(ctx context.Context, runID, artifactPath string, r 
 		opt(o)
 	}
 
-	content, err := io.ReadAll(r)
+	content, err := readArtifactContent(r)
 	if err != nil {
-		return fmt.Errorf("failed to read artifact content: %w", err)
+		return err
 	}
 
 	artifactURI, err := c.store.ArtifactURI(ctx, runID)
@@ -92,8 +94,9 @@ func (c *Client) LogArtifact(ctx context.Context, runID, artifactPath string, r 
 	return nil
 }
 
-// DownloadArtifact downloads a single artifact file from a run.
-func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath string, opts ...DownloadArtifactOption) ([]byte, error) {
+// DownloadArtifact opens a single artifact file from a run for streaming download.
+// The caller must close the returned ReadCloser.
+func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath string, opts ...DownloadArtifactOption) (io.ReadCloser, error) {
 	if runID == "" {
 		return nil, fmt.Errorf("mlflow: run ID is required")
 	}
@@ -112,10 +115,22 @@ func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath strin
 	}
 
 	downloadOpts := artifact.DownloadOptions{Expiration: o.expiration}
-	data, err := c.store.Download(ctx, runID, artifactURI, artifactPath, downloadOpts)
+	rc, err := c.store.Download(ctx, runID, artifactURI, artifactPath, downloadOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact: %w", err)
 	}
 
-	return data, nil
+	return rc, nil
+}
+
+func readArtifactContent(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxArtifactUploadSize+1)
+	content, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read artifact content: %w", err)
+	}
+	if int64(len(content)) > maxArtifactUploadSize {
+		return nil, fmt.Errorf("artifact content exceeds maximum upload size of %d bytes", maxArtifactUploadSize)
+	}
+	return content, nil
 }
