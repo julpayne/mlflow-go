@@ -1,0 +1,173 @@
+package artifact
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/opendatahub-io/mlflow-go/internal/transport"
+)
+
+func newTestStore(t *testing.T, handler http.Handler) *Store {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	tc, err := transport.New(transport.Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("transport.New() error = %v", err)
+	}
+
+	return NewStore(tc)
+}
+
+func TestStore_UploadPresigned(t *testing.T) {
+	presignedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "artifact-bytes" {
+			t.Errorf("body = %q, want artifact-bytes", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(presignedServer.Close)
+
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/presigned-upload-url"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"presigned_url": presignedServer.URL,
+				"headers":       map[string]string{"Content-Type": "text/plain"},
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	err := store.Upload(context.Background(), "run-1", "", "metrics.txt", []byte("artifact-bytes"), UploadOptions{ContentType: "text/plain"})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+}
+
+func TestStore_UploadProxyFallback(t *testing.T) {
+	var uploadedPath string
+
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/presigned-upload-url"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error_code": "ENDPOINT_NOT_FOUND",
+				"message":    "not supported",
+			})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/mlflow-artifacts/artifacts/"):
+			uploadedPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
+	err := store.Upload(context.Background(), "run-1", artifactURI, "metrics.txt", []byte("proxy-bytes"), UploadOptions{})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+
+	wantPath := "/api/2.0/mlflow-artifacts/artifacts/experiments/1/runs/abc/artifacts/metrics.txt"
+	if uploadedPath != wantPath {
+		t.Errorf("upload path = %q, want %q", uploadedPath, wantPath)
+	}
+}
+
+func TestStore_DownloadPresigned(t *testing.T) {
+	presignedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("downloaded-bytes"))
+	}))
+	t.Cleanup(presignedServer.Close)
+
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/mlflow-artifacts/presigned/"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"url": presignedServer.URL,
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
+	data, err := store.Download(context.Background(), artifactURI, "metrics.txt", DownloadOptions{})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if string(data) != "downloaded-bytes" {
+		t.Errorf("data = %q, want downloaded-bytes", string(data))
+	}
+}
+
+func TestStore_DownloadProxyFallback(t *testing.T) {
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/mlflow-artifacts/presigned/"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error_code": "ENDPOINT_NOT_FOUND",
+				"message":    "not supported",
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/mlflow-artifacts/artifacts/"):
+			w.Write([]byte("proxy-download"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
+	data, err := store.Download(context.Background(), artifactURI, "metrics.txt", DownloadOptions{})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if string(data) != "proxy-download" {
+		t.Errorf("data = %q, want proxy-download", string(data))
+	}
+}
+
+func TestStore_ArtifactURI(t *testing.T) {
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("run_id") != "run-1" {
+			t.Errorf("run_id = %q, want run-1", r.URL.Query().Get("run_id"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"run": map[string]any{
+				"info": map[string]any{
+					"artifact_uri": "mlflow-artifacts:/experiments/1/runs/abc/artifacts",
+				},
+			},
+		})
+	}))
+
+	artifactURI, err := store.ArtifactURI(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("ArtifactURI() error = %v", err)
+	}
+	if artifactURI != "mlflow-artifacts:/experiments/1/runs/abc/artifacts" {
+		t.Errorf("ArtifactURI = %q, want mlflow-artifacts URI", artifactURI)
+	}
+}

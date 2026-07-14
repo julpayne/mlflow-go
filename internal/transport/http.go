@@ -91,6 +91,23 @@ func (c *Client) Delete(ctx context.Context, path string, body, result any) erro
 	return c.do(ctx, http.MethodDelete, path, nil, body, result)
 }
 
+// GetBytes performs a GET request and returns the raw response body.
+func (c *Client) GetBytes(ctx context.Context, path string, query url.Values) ([]byte, string, error) {
+	return c.doRaw(ctx, http.MethodGet, path, query, nil, "", false)
+}
+
+// PutBytes performs a PUT request with a raw body and content type.
+func (c *Client) PutBytes(ctx context.Context, path string, body []byte, contentType string) error {
+	_, _, err := c.doRaw(ctx, http.MethodPut, path, nil, body, contentType, false)
+	return err
+}
+
+// DoAbsolute performs an HTTP request to an absolute URL outside the tracking server base URL.
+// This is used for presigned artifact upload/download URLs.
+func (c *Client) DoAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {
+	return c.doAbsolute(ctx, method, absoluteURL, headers, body)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, result any) error {
 	// Build request URL, preserving any path prefix from the base URL
 	// (e.g., base "https://host/mlflow" + path "/api/2.0/mlflow/..." → "/mlflow/api/2.0/mlflow/...")
@@ -164,6 +181,111 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 
 	return nil
+}
+
+func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) ([]byte, string, error) {
+	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
+	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), bodyReader)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if body != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if jsonAccept {
+		req.Header.Set("Accept", "application/json")
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	start := time.Now()
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", method,
+			"url", reqURL.String(),
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if c.logger != nil {
+		c.logger.Debug("response",
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, "", c.parseError(resp.StatusCode, respBody)
+	}
+
+	return respBody, resp.Header.Get("Content-Type"), nil
+}
+
+func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, absoluteURL, bodyReader)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	start := time.Now()
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", method,
+			"url", absoluteURL,
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if c.logger != nil {
+		c.logger.Debug("response",
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, "", c.parseError(resp.StatusCode, respBody)
+	}
+
+	return respBody, resp.Header.Get("Content-Type"), nil
 }
 
 func (c *Client) parseError(statusCode int, body []byte) error {

@@ -207,3 +207,19 @@ func TestClient_PromptRegistry_ReturnsSameInstance(t *testing.T) {
 		t.Error("PromptRegistry() should return same instance")
 	}
 }
+
+func TestClient_Artifacts_ReturnsSameInstance(t *testing.T) {
+	client, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	a1 := client.Artifacts()
+	a2 := client.Artifacts()
+
+	if a1 != a2 {
+		t.Error("Artifacts() should return same instance")
+	}
+}

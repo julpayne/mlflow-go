@@ -248,6 +248,40 @@ err = client.Tracking().DeleteRun(ctx, runID)
 err = client.Tracking().DeleteExperiment(ctx, expID)
 ```
 
+### Artifacts
+
+Upload, list, and download run artifacts via `client.Artifacts()`. The client tries presigned URLs first (for cloud-backed artifact stores) and falls back to the mlflow-artifacts proxy when the server is started with `--serve-artifacts`.
+
+```go
+import (
+    "bytes"
+    "github.com/opendatahub-io/mlflow-go/mlflow/artifacts"
+)
+
+// Upload an artifact file
+err := client.Artifacts().LogArtifact(ctx, runID, "metrics/output.txt",
+    bytes.NewReader([]byte("accuracy=0.95")),
+    artifacts.WithContentType("text/plain"),
+)
+
+// List artifacts (optionally filter by path prefix)
+list, err := client.Artifacts().ListArtifacts(ctx, runID, artifacts.WithArtifactPath("metrics"))
+
+// Download an artifact file
+data, err := client.Artifacts().DownloadArtifact(ctx, runID, "metrics/output.txt")
+```
+
+For local development, start MLflow with artifact serving enabled (`make dev/up` configures this automatically):
+
+```bash
+mlflow server \
+  --serve-artifacts \
+  --artifacts-destination ./mlartifacts \
+  --default-artifact-root http://localhost:5000/api/2.0/mlflow-artifacts/artifacts/experiments
+```
+
+Presigned upload requires MLflow 3.12+ with a cloud-backed artifact store (S3, GCS, etc.).
+
 ### View Types
 
 Use typed constants to filter by lifecycle stage:
@@ -540,7 +574,7 @@ if err != nil {
 | Set experiment tags | ✅ Supported |
 | Restore experiments/runs | ❌ Not yet |
 | Metric history | ❌ Not yet |
-| Artifact management | ❌ Not yet |
+| Artifact management | ✅ Supported (list, upload, download) |
 
 ### Prompt Registry
 
@@ -631,6 +665,10 @@ mlflow-go/
 │   │   ├── client.go           # Tracking API methods
 │   │   ├── types.go            # Experiment, Run, Metric, Param types
 │   │   └── options.go          # Domain-specific options
+│   ├── artifacts/              # Artifacts sub-client
+│   │   ├── client.go           # ListArtifacts, LogArtifact, DownloadArtifact
+│   │   ├── types.go            # FileInfo, ListArtifactsResult types
+│   │   └── options.go          # Domain-specific options
 │   └── promptregistry/         # Prompt Registry sub-client
 │       ├── client.go           # PromptRegistry API methods
 │       ├── prompt.go           # Prompt, PromptInfo types
@@ -638,6 +676,7 @@ mlflow-go/
 ├── internal/                   # Internal packages
 │   ├── conv/                   # Shared type-conversion helpers
 │   ├── errors/                 # APIError implementation
+│   ├── artifact/               # Artifact URI resolution and store logic
 │   └── transport/              # HTTP client
 ├── sample-app/                 # Demo application
 └── specs/                      # Design documentation

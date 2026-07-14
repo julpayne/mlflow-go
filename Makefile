@@ -85,16 +85,18 @@ test/integration-ci: $(UV)
 		--host 127.0.0.1 \
 		--port $(MLFLOW_TEST_PORT) \
 		--backend-store-uri sqlite:///$(MLFLOW_TEST_DATA)/mlflow.db \
-		--default-artifact-root $(MLFLOW_TEST_DATA)/artifacts &
+		--artifacts-destination $(MLFLOW_TEST_DATA)/artifacts \
+		--default-artifact-root http://127.0.0.1:$(MLFLOW_TEST_PORT)/api/2.0/mlflow-artifacts/artifacts/experiments \
+		--serve-artifacts &
 	@echo "Waiting for MLflow to be ready..."
-	@READY=0; for i in $$(seq 1 30); do \
+	@READY=0; for i in $$(seq 1 60); do \
 		if curl -s http://localhost:$(MLFLOW_TEST_PORT)/health > /dev/null 2>&1; then \
 			echo "MLflow is ready!"; \
 			READY=1; \
 			sleep 2; \
 			break; \
 		fi; \
-		echo "Waiting... ($$i/30)"; \
+		echo "Waiting... ($$i/60)"; \
 		sleep 2; \
 	done; \
 	if [ $$READY -eq 0 ]; then echo "ERROR: MLflow failed to start" && exit 1; fi
@@ -192,6 +194,7 @@ gen: tools/proto/fetch-protos.sh $(PROTOC_GEN_GO)
 		--go_opt=module=github.com/opendatahub-io/mlflow-go \
 		assessments.proto datasets.proto opentelemetry/proto/trace/v1/trace.proto
 	@echo "  Generating MLflow types..."
+	@mkdir -p internal/gen/artifactspb
 	PATH=$(LOCALBIN):$$PATH protoc \
 		--proto_path=internal/gen/mlflowpb \
 		--proto_path=tools/proto/stubs \
@@ -204,6 +207,15 @@ gen: tools/proto/fetch-protos.sh $(PROTOC_GEN_GO)
 		--go_opt=Mdatasets.proto=github.com/opendatahub-io/mlflow-go/internal/gen/datasetspb \
 		--go_opt=Mopentelemetry/proto/trace/v1/trace.proto=github.com/opendatahub-io/mlflow-go/internal/gen/otelpb \
 		model_registry.proto service.proto databricks.proto
+	@echo "  Generating MLflow artifacts types..."
+	PATH=$(LOCALBIN):$$PATH protoc \
+		--proto_path=internal/gen/artifactspb \
+		--proto_path=tools/proto/stubs \
+		--go_out=internal/gen/artifactspb \
+		--go_opt=paths=source_relative \
+		--go_opt=Mmlflow_artifacts.proto=github.com/opendatahub-io/mlflow-go/internal/gen/artifactspb \
+		--go_opt=Mdatabricks.proto=github.com/opendatahub-io/mlflow-go/internal/gen/mlflowpb \
+		mlflow_artifacts.proto
 
 # UV installation (lazy install)
 $(UV):
@@ -220,7 +232,9 @@ dev/up: $(UV)
 		--host 127.0.0.1 \
 		--port $(MLFLOW_PORT) \
 		--backend-store-uri sqlite:///$(MLFLOW_DATA)/mlflow.db \
-		--default-artifact-root $(MLFLOW_DATA)/artifacts
+		--artifacts-destination $(MLFLOW_DATA)/artifacts \
+		--default-artifact-root http://127.0.0.1:$(MLFLOW_PORT)/api/2.0/mlflow-artifacts/artifacts/experiments \
+		--serve-artifacts
 
 dev/up-midstream:
 	@MLFLOW_ENABLE_WORKSPACES=true $(MAKE) dev/up MLFLOW_SOURCE="$(MLFLOW_MIDSTREAM_SOURCE)"

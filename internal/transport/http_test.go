@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -491,5 +492,123 @@ func TestCustomHeadersWithToken(t *testing.T) {
 	}
 	if got := receivedHeaders.Get("X-MLFLOW-WORKSPACE"); got != "team-dora" {
 		t.Errorf("X-MLFLOW-WORKSPACE = %q, want %q", got, "team-dora")
+	}
+}
+
+func TestClient_GetBytes_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if r.Header.Get("Accept") == "application/json" {
+			t.Error("GetBytes should not set Accept: application/json")
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write([]byte("artifact-data"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data, contentType, err := client.GetBytes(context.Background(), "/api/artifacts/file", nil)
+	if err != nil {
+		t.Fatalf("GetBytes() error = %v", err)
+	}
+	if string(data) != "artifact-data" {
+		t.Errorf("data = %q, want artifact-data", string(data))
+	}
+	if contentType != "application/octet-stream" {
+		t.Errorf("contentType = %q, want application/octet-stream", contentType)
+	}
+}
+
+func TestClient_PutBytes_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "upload-data" {
+			t.Errorf("body = %q, want upload-data", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutBytes(context.Background(), "/api/artifacts/file", []byte("upload-data"), "application/octet-stream")
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+}
+
+func TestClient_GetBytes_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error_code": "RESOURCE_DOES_NOT_EXIST",
+			"message":    "Artifact not found",
+		})
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, _, err = client.GetBytes(context.Background(), "/api/artifacts/missing", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.IsNotFound(err) {
+		t.Errorf("expected IsNotFound, got %v", err)
+	}
+}
+
+func TestClient_DoAbsolute_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		if r.Header.Get("X-Amz-Signature") != "abc123" {
+			t.Errorf("expected X-Amz-Signature header")
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "presigned-upload" {
+			t.Errorf("body = %q, want presigned-upload", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: "http://localhost:9999"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data, _, err := client.DoAbsolute(
+		context.Background(),
+		http.MethodPut,
+		server.URL+"/presigned",
+		map[string]string{"X-Amz-Signature": "abc123", "Content-Type": "application/octet-stream"},
+		[]byte("presigned-upload"),
+	)
+	if err != nil {
+		t.Fatalf("DoAbsolute() error = %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected empty response body, got %q", string(data))
 	}
 }
