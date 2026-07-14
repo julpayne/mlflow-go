@@ -63,6 +63,26 @@ func TestResolveStoragePath(t *testing.T) {
 	}
 }
 
+func TestSupportsTrackingServerArtifacts(t *testing.T) {
+	tests := []struct {
+		artifactURI string
+		want        bool
+	}{
+		{"/tmp/mlruns/1/run-1/artifacts", true},
+		{"file:///tmp/mlruns/1/run-1/artifacts", true},
+		{"mlflow-artifacts:/experiments/1/runs/abc/artifacts", false},
+		{"http://localhost:5000/api/2.0/mlflow-artifacts/artifacts/experiments/1/runs/abc/artifacts", false},
+		{"s3://bucket/path", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		if got := SupportsTrackingServerArtifacts(tt.artifactURI); got != tt.want {
+			t.Errorf("SupportsTrackingServerArtifacts(%q) = %v, want %v", tt.artifactURI, got, tt.want)
+		}
+	}
+}
+
 func TestIsProxied(t *testing.T) {
 	tests := []struct {
 		artifactURI string

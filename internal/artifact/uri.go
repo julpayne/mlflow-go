@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	mlflowArtifactsScheme = "mlflow-artifacts"
-	artifactsAPIPrefix    = "/api/2.0/mlflow-artifacts/artifacts"
+	mlflowArtifactsScheme      = "mlflow-artifacts"
+	artifactsAPIPrefix         = "/api/2.0/mlflow-artifacts/artifacts"
+	trackingServerUploadPath   = "/ajax-api/2.0/mlflow/upload-artifact"
+	trackingServerDownloadPath = "/get-artifact"
 )
 
 // ResolveStoragePath maps a run artifact URI and relative artifact path to the
@@ -56,6 +58,26 @@ func ResolveStoragePath(artifactURI, artifactPath string) (string, error) {
 		return "", fmt.Errorf("mlflow: artifact path %q escapes the run artifact directory", artifactPath)
 	}
 	return cleaned, nil
+}
+
+// SupportsTrackingServerArtifacts reports whether artifacts are stored on the
+// tracking server filesystem and can be uploaded/downloaded via legacy server routes.
+func SupportsTrackingServerArtifacts(artifactURI string) bool {
+	if artifactURI == "" || IsProxied(artifactURI) {
+		return false
+	}
+
+	parsed, err := url.Parse(artifactURI)
+	if err != nil {
+		return false
+	}
+
+	switch parsed.Scheme {
+	case "", "file":
+		return true
+	default:
+		return false
+	}
 }
 
 // IsProxied reports whether artifact upload/download can use the mlflow-artifacts proxy.

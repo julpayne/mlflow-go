@@ -58,20 +58,28 @@ func (s *Store) Upload(ctx context.Context, runID, artifactURI, artifactPath str
 		return err
 	}
 
-	if !IsProxied(artifactURI) {
-		return fmt.Errorf("failed to upload artifact: presigned upload unavailable and artifact URI %q does not support proxy upload; configure --serve-artifacts with an mlflow-artifacts artifact root", artifactURI)
+	if IsProxied(artifactURI) {
+		storagePath, resolveErr := ResolveStoragePath(artifactURI, artifactPath)
+		if resolveErr != nil {
+			return resolveErr
+		}
+
+		if err := s.transport.PutBytes(ctx, ProxyUploadPath(storagePath), content, contentType); err != nil {
+			return fmt.Errorf("failed to upload artifact via proxy: %w", err)
+		}
+
+		return nil
 	}
 
-	storagePath, err := ResolveStoragePath(artifactURI, artifactPath)
-	if err != nil {
-		return err
+	if SupportsTrackingServerArtifacts(artifactURI) {
+		if err := s.uploadViaTrackingServer(ctx, runID, artifactPath, content, contentType); err != nil {
+			return fmt.Errorf("failed to upload artifact via tracking server: %w", err)
+		}
+
+		return nil
 	}
 
-	if err := s.transport.PutBytes(ctx, ProxyUploadPath(storagePath), content, contentType); err != nil {
-		return fmt.Errorf("failed to upload artifact via proxy: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("failed to upload artifact: presigned upload unavailable and artifact URI %q does not support proxy or tracking-server upload", artifactURI)
 }
 
 // DownloadOptions configures artifact download behavior.
@@ -80,12 +88,28 @@ type DownloadOptions struct {
 }
 
 // Download downloads artifact bytes for a run, preferring presigned URLs when available.
-func (s *Store) Download(ctx context.Context, artifactURI, artifactPath string, opts DownloadOptions) ([]byte, error) {
+func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath string, opts DownloadOptions) ([]byte, error) {
+	if runID == "" {
+		return nil, fmt.Errorf("mlflow: run ID is required")
+	}
 	if artifactURI == "" {
 		return nil, fmt.Errorf("mlflow: artifact URI is required")
 	}
 	if artifactPath == "" {
 		return nil, fmt.Errorf("mlflow: artifact path is required")
+	}
+
+	if SupportsTrackingServerArtifacts(artifactURI) {
+		data, err := s.downloadViaTrackingServer(ctx, runID, artifactPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download artifact via tracking server: %w", err)
+		}
+
+		return data, nil
+	}
+
+	if !IsProxied(artifactURI) {
+		return nil, fmt.Errorf("failed to download artifact: artifact URI %q does not support proxy or tracking-server download", artifactURI)
 	}
 
 	storagePath, err := ResolveStoragePath(artifactURI, artifactPath)
@@ -99,10 +123,6 @@ func (s *Store) Download(ctx context.Context, artifactURI, artifactPath string, 
 	}
 	if !shouldFallbackFromPresigned(err) {
 		return nil, err
-	}
-
-	if !IsProxied(artifactURI) {
-		return nil, fmt.Errorf("failed to download artifact: presigned download unavailable and artifact URI %q does not support proxy download", artifactURI)
 	}
 
 	data, _, err = s.transport.GetBytes(ctx, ProxyDownloadPath(storagePath), nil)
@@ -201,6 +221,23 @@ func (s *Store) downloadPresigned(ctx context.Context, storagePath string, expir
 	}
 
 	return data, nil
+}
+
+func (s *Store) uploadViaTrackingServer(ctx context.Context, runID, artifactPath string, content []byte, contentType string) error {
+	query := url.Values{
+		"run_uuid": []string{runID},
+		"path":     []string{artifactPath},
+	}
+	return s.transport.PostBytes(ctx, trackingServerUploadPath, query, content, contentType)
+}
+
+func (s *Store) downloadViaTrackingServer(ctx context.Context, runID, artifactPath string) ([]byte, error) {
+	query := url.Values{
+		"run_id": []string{runID},
+		"path":   []string{artifactPath},
+	}
+	data, _, err := s.transport.GetBytes(ctx, trackingServerDownloadPath, query)
+	return data, err
 }
 
 func shouldFallbackFromPresigned(err error) bool {

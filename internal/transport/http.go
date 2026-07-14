@@ -102,6 +102,12 @@ func (c *Client) PutBytes(ctx context.Context, path string, body []byte, content
 	return err
 }
 
+// PostBytes performs a POST request with a raw body and content type.
+func (c *Client) PostBytes(ctx context.Context, path string, query url.Values, body []byte, contentType string) error {
+	_, _, err := c.doRaw(ctx, http.MethodPost, path, query, body, contentType, false)
+	return err
+}
+
 // DoAbsolute performs an HTTP request to an absolute URL outside the tracking server base URL.
 // This is used for presigned artifact upload/download URLs.
 func (c *Client) DoAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {

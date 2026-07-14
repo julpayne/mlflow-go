@@ -111,7 +111,7 @@ func TestStore_DownloadPresigned(t *testing.T) {
 	}))
 
 	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
-	data, err := store.Download(context.Background(), artifactURI, "metrics.txt", DownloadOptions{})
+	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
@@ -139,12 +139,80 @@ func TestStore_DownloadProxyFallback(t *testing.T) {
 	}))
 
 	artifactURI := "mlflow-artifacts:/experiments/1/runs/abc/artifacts"
-	data, err := store.Download(context.Background(), artifactURI, "metrics.txt", DownloadOptions{})
+	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
 	if string(data) != "proxy-download" {
 		t.Errorf("data = %q, want proxy-download", string(data))
+	}
+}
+
+func TestStore_UploadTrackingServerFallback(t *testing.T) {
+	var uploaded bool
+
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/presigned-upload-url"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error_code": "NOT_IMPLEMENTED",
+				"message":    "Presigned upload is not supported for the current artifact repository.",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/upload-artifact"):
+			if r.URL.Query().Get("run_uuid") != "run-1" {
+				t.Errorf("run_uuid = %q, want run-1", r.URL.Query().Get("run_uuid"))
+			}
+			if r.URL.Query().Get("path") != "metrics.txt" {
+				t.Errorf("path = %q, want metrics.txt", r.URL.Query().Get("path"))
+			}
+			body, _ := io.ReadAll(r.Body)
+			if string(body) != "tracking-server-bytes" {
+				t.Errorf("body = %q, want tracking-server-bytes", string(body))
+			}
+			uploaded = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "/tmp/mlruns/1/run-1/artifacts"
+	err := store.Upload(context.Background(), "run-1", artifactURI, "metrics.txt", []byte("tracking-server-bytes"), UploadOptions{})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if !uploaded {
+		t.Error("expected artifact upload via tracking server")
+	}
+}
+
+func TestStore_DownloadTrackingServer(t *testing.T) {
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/get-artifact":
+			if r.URL.Query().Get("run_id") != "run-1" {
+				t.Errorf("run_id = %q, want run-1", r.URL.Query().Get("run_id"))
+			}
+			if r.URL.Query().Get("path") != "metrics.txt" {
+				t.Errorf("path = %q, want metrics.txt", r.URL.Query().Get("path"))
+			}
+			w.Write([]byte("tracking-server-download"))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "file:///tmp/mlruns/1/run-1/artifacts"
+	data, err := store.Download(context.Background(), "run-1", artifactURI, "metrics.txt", DownloadOptions{})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if string(data) != "tracking-server-download" {
+		t.Errorf("data = %q, want tracking-server-download", string(data))
 	}
 }
 

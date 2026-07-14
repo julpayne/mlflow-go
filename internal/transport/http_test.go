@@ -552,6 +552,37 @@ func TestClient_PutBytes_Success(t *testing.T) {
 	}
 }
 
+func TestClient_PostBytes_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Query().Get("run_uuid") != "run-1" {
+			t.Errorf("run_uuid = %q, want run-1", r.URL.Query().Get("run_uuid"))
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "text/plain" {
+			t.Errorf("Content-Type = %q, want text/plain", ct)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "post-data" {
+			t.Errorf("body = %q, want post-data", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	query := url.Values{"run_uuid": []string{"run-1"}}
+	err = client.PostBytes(context.Background(), "/upload", query, []byte("post-data"), "text/plain")
+	if err != nil {
+		t.Fatalf("PostBytes() error = %v", err)
+	}
+}
+
 func TestClient_GetBytes_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

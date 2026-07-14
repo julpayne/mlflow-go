@@ -112,7 +112,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath strin
 	}
 
 	downloadOpts := artifact.DownloadOptions{Expiration: o.expiration}
-	data, err := c.store.Download(ctx, artifactURI, artifactPath, downloadOpts)
+	data, err := c.store.Download(ctx, runID, artifactURI, artifactPath, downloadOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact: %w", err)
 	}
