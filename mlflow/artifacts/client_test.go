@@ -139,19 +139,26 @@ func TestClient_DownloadArtifactProxy(t *testing.T) {
 }
 
 func TestClient_ListArtifacts_Validation(t *testing.T) {
+	var unexpectedRequests []string
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("unexpected request")
+		unexpectedRequests = append(unexpectedRequests, r.Method+" "+r.URL.Path)
+		http.NotFound(w, r)
 	}))
 
 	_, err := client.ListArtifacts(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected error for empty run ID")
 	}
+	if len(unexpectedRequests) > 0 {
+		t.Errorf("unexpected HTTP requests: %v", unexpectedRequests)
+	}
 }
 
 func TestClient_LogArtifact_Validation(t *testing.T) {
+	var unexpectedRequests []string
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("unexpected request")
+		unexpectedRequests = append(unexpectedRequests, r.Method+" "+r.URL.Path)
+		http.NotFound(w, r)
 	}))
 
 	err := client.LogArtifact(context.Background(), "", "file.txt", bytes.NewReader([]byte("x")))
@@ -167,5 +174,9 @@ func TestClient_LogArtifact_Validation(t *testing.T) {
 	err = client.LogArtifact(context.Background(), "run-1", "file.txt", nil)
 	if err == nil {
 		t.Fatal("expected error for nil reader")
+	}
+
+	if len(unexpectedRequests) > 0 {
+		t.Errorf("unexpected HTTP requests: %v", unexpectedRequests)
 	}
 }

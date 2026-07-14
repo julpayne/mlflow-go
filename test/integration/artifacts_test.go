@@ -54,7 +54,7 @@ func TestArtifactRoundTrip(t *testing.T) {
 
 	found := false
 	for _, file := range listResult.Files {
-		if file.Path == artifactPath || file.Path == "output.txt" {
+		if file.Path == artifactPath {
 			found = true
 			if file.IsDir {
 				t.Errorf("artifact %q should not be a directory", artifactPath)

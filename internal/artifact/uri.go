@@ -46,7 +46,11 @@ func ResolveStoragePath(artifactURI, artifactPath string) (string, error) {
 		return basePath, nil
 	}
 
-	return path.Join(basePath, artifactPath), nil
+	cleaned := path.Join(basePath, artifactPath)
+	if !strings.HasPrefix(cleaned, basePath+"/") && cleaned != basePath {
+		return "", fmt.Errorf("mlflow: artifact path %q escapes the run artifact directory", artifactPath)
+	}
+	return cleaned, nil
 }
 
 // IsProxied reports whether artifact upload/download can use the mlflow-artifacts proxy.
