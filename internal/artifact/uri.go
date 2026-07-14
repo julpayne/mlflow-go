@@ -47,6 +47,10 @@ func ResolveStoragePath(artifactURI, artifactPath string) (string, error) {
 	}
 
 	basePath = path.Clean(basePath)
+	if basePath == "." || basePath == ".." ||
+		path.IsAbs(basePath) || strings.HasPrefix(basePath, "../") {
+		return "", fmt.Errorf("mlflow: artifact URI path escapes the artifact root")
+	}
 	cleaned := path.Join(basePath, artifactPath)
 	if !strings.HasPrefix(cleaned, basePath+"/") && cleaned != basePath {
 		return "", fmt.Errorf("mlflow: artifact path %q escapes the run artifact directory", artifactPath)
