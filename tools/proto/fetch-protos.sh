@@ -74,58 +74,7 @@ done
 # Remove optional dependencies not needed by the Go SDK to avoid import cycles.
 if [[ -f "${OUTPUT_DIR}/service.proto" ]]; then
     echo "  Post-processing: removing issues and prompt optimization from service.proto..."
-    python3 -c "
-import re, sys
-
-with open(sys.argv[1]) as f:
-    content = f.read()
-
-content = re.sub(r'^import \"issues\\.proto\";\\n', '', content, flags=re.MULTILINE)
-content = re.sub(r'^import \"prompt_optimization\\.proto\";\\n', '', content, flags=re.MULTILINE)
-
-def remove_rpc_blocks(text):
-    pattern = re.compile(
-        r'  rpc (?:createIssue|updateIssue|getIssue|searchIssues|'
-        r'createPromptOptimizationJob|getPromptOptimizationJob|'
-        r'searchPromptOptimizationJobs|cancelPromptOptimizationJob|'
-        r'deletePromptOptimizationJob)\\b.*?(?=\\n  rpc |\\n\\})',
-        re.DOTALL,
-    )
-    return pattern.sub('', text)
-
-content = remove_rpc_blocks(content)
-
-def remove_messages(text):
-    for name in [
-        'CreatePromptOptimizationJob', 'GetPromptOptimizationJob',
-        'SearchPromptOptimizationJobs', 'CancelPromptOptimizationJob',
-        'DeletePromptOptimizationJob', 'PromptOptimizationJob',
-        'PromptOptimizationJobConfig', 'PromptOptimizationJobTag',
-    ]:
-        pattern = re.compile(
-            rf'message {name} \\{{.*?(?=\\nmessage |\\Z)',
-            re.DOTALL,
-        )
-        text = pattern.sub('', text)
-    return text
-
-content = remove_messages(content)
-
-forbidden = [
-    'import "issues.proto"',
-    'import "prompt_optimization.proto"',
-    'PromptOptimizationJob',
-    'CreateIssue',
-    'createPromptOptimizationJob',
-]
-for token in forbidden:
-    if token in content:
-        print(f'ERROR: service.proto still contains {token!r} after post-processing', file=sys.stderr)
-        sys.exit(1)
-
-with open(sys.argv[1], 'w') as f:
-    f.write(content)
-" "${OUTPUT_DIR}/service.proto"
+    python3 "${SCRIPT_DIR}/strip-unused-service-apis.py" "${OUTPUT_DIR}/service.proto"
 fi
 
 # Post-process service.proto: remove error_codes array blocks that protoc can't parse

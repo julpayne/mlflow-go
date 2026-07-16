@@ -1354,13 +1354,9 @@ service MlflowService {
     };
   }
 
-  // Issue RPCs
+  // Evaluation Dataset RPCs
 
-  // Create an issue.
-
-
-
-
+  // Create an evaluation dataset
   rpc createDataset(CreateDataset) returns (CreateDataset.Response) {
     option (rpc) = {
       endpoints: [
@@ -2336,15 +2332,6 @@ service MlflowService {
       rpc_doc_title: "Update Endpoint Guardrail Config"
     };
   }
-
-  // Create a new prompt optimization job.
-  // This endpoint initiates an optimization run with the specified configuration.
-  // The optimization process runs asynchronously and can be monitored via getPromptOptimizationJob.
-
-
-
-
-
 }
 
 // View type for ListExperiments query.
@@ -5236,13 +5223,11 @@ message GetSecretsConfig {
   }
 }
 
-// ========== Prompt Optimization API Messages ==========
+// =============================================================================
+// Workspace Management Messages
+// =============================================================================
 
-
-
-
-
-
+// Workspace metadata returned by workspace APIs.
 message Workspace {
   // The unique workspace name.
   optional string name = 1 [(validate_required) = true];

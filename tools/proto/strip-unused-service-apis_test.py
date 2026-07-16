@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Tests for strip-unused-service-apis.py."""
+
+from __future__ import annotations
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+SCRIPT = Path(__file__).with_name("strip-unused-service-apis.py")
+SPEC = importlib.util.spec_from_file_location("strip_unused_service_apis", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+MOD = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MOD)
+
+SAMPLE = """\
+syntax = "proto2";
+
+import "issues.proto";
+import "prompt_optimization.proto";
+import "scalapb/scalapb.proto";
+
+service MlflowService {
+  rpc deleteAssessment(DeleteAssessment) returns (DeleteAssessment.Response) {
+    option (rpc) = {
+      visibility: PUBLIC_UNDOCUMENTED
+    };
+  }
+
+  // Issue RPCs
+
+  // Create an issue.
+  rpc createIssue(mlflow.issues.CreateIssue) returns (mlflow.issues.CreateIssue.Response) {
+    option (rpc) = {
+      visibility: PUBLIC_UNDOCUMENTED
+    };
+  }
+
+  // Update an existing issue.
+  rpc updateIssue(mlflow.issues.UpdateIssue) returns (mlflow.issues.UpdateIssue.Response) {
+    option (rpc) = {
+      visibility: PUBLIC_UNDOCUMENTED
+    };
+  }
+
+  // Evaluation Dataset RPCs
+
+  // Create an evaluation dataset
+  rpc createDataset(CreateDataset) returns (CreateDataset.Response) {
+    option (rpc) = {
+      visibility: PUBLIC_UNDOCUMENTED
+    };
+  }
+
+  // Create a new prompt optimization job.
+  // This endpoint initiates an optimization run with the specified configuration.
+  // The optimization process runs asynchronously and can be monitored via getPromptOptimizationJob.
+  rpc createPromptOptimizationJob(CreatePromptOptimizationJob) returns (CreatePromptOptimizationJob.Response) {
+    option (rpc) = {
+      visibility: PUBLIC
+    };
+  }
+
+  // Get the details and status of a prompt optimization job.
+  rpc getPromptOptimizationJob(GetPromptOptimizationJob) returns (GetPromptOptimizationJob.Response) {
+    option (rpc) = {
+      visibility: PUBLIC
+    };
+  }
+}
+
+// ========== Prompt Optimization API Messages ==========
+
+message CreatePromptOptimizationJob {
+  optional string experiment_id = 1;
+  message Response {
+    optional PromptOptimizationJob job = 1;
+  }
+}
+
+message GetPromptOptimizationJob {
+  optional string job_id = 1;
+  message Response {
+    optional PromptOptimizationJob job = 1;
+  }
+}
+
+message PromptOptimizationJob {
+  optional string job_id = 1;
+}
+
+message PromptOptimizationJobConfig {
+  optional int32 max_iterations = 1;
+}
+
+message PromptOptimizationJobTag {
+  optional string key = 1;
+}
+
+// =============================================================================
+// Workspace Management Messages
+// =============================================================================
+
+message Workspace {
+  optional string name = 1;
+}
+"""
+
+
+class StripUnusedServiceAPIsTest(unittest.TestCase):
+    def test_strips_rpcs_messages_and_orphaned_comments(self) -> None:
+        content = SAMPLE
+        content = content.replace('import "issues.proto";\n', "")
+        content = content.replace('import "prompt_optimization.proto";\n', "")
+        content = MOD.remove_rpc_blocks(content)
+        content = MOD.remove_messages(content)
+        content = MOD.cleanup_orphans(content)
+
+        self.assertNotIn("createIssue", content)
+        self.assertNotIn("createPromptOptimizationJob", content)
+        self.assertNotIn("Issue RPCs", content)
+        self.assertNotIn("Create an issue", content)
+        self.assertNotIn("Update an existing issue", content)
+        self.assertNotIn("prompt optimization job", content)
+        self.assertNotIn("Prompt Optimization API Messages", content)
+        self.assertNotIn("message CreatePromptOptimizationJob", content)
+        self.assertNotIn("PromptOptimizationJob", content)
+
+        # Kept APIs and their docs / following section headers must remain.
+        self.assertIn("rpc createDataset", content)
+        self.assertIn("Evaluation Dataset RPCs", content)
+        self.assertIn("Create an evaluation dataset", content)
+        self.assertIn("Workspace Management Messages", content)
+        self.assertIn("message Workspace", content)
+
+        for token in MOD.FORBIDDEN:
+            self.assertNotIn(token, content)
+
+
+if __name__ == "__main__":
+    unittest.main()
