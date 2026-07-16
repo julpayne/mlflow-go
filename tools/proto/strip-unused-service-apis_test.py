@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -160,6 +161,31 @@ message Workspace {
         self.assertNotIn("Prompt Optimization API Messages", content)
         self.assertIn("Workspace metadata returned by workspace APIs", content)
         self.assertIn("message Workspace", content)
+
+    def test_validate_proto_path_accepts_in_scope_proto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proto = root / "service.proto"
+            proto.write_text('syntax = "proto2";\n')
+            got = MOD.validate_proto_path(str(proto), allowed_dir=root)
+            self.assertEqual(got, proto.resolve())
+
+    def test_validate_proto_path_rejects_invalid_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "protos"
+            root.mkdir()
+            (root / "service.proto").write_text('syntax = "proto2";\n')
+            outside = Path(tmp) / "escape.proto"
+            outside.write_text('syntax = "proto2";\n')
+
+            with self.assertRaisesRegex(ValueError, r"\.proto extension"):
+                MOD.validate_proto_path(str(root / "notes.txt"), allowed_dir=root)
+            with self.assertRaisesRegex(ValueError, r"must be under"):
+                MOD.validate_proto_path(str(outside), allowed_dir=root)
+            with self.assertRaisesRegex(ValueError, r"must be under"):
+                MOD.validate_proto_path(str(root / ".." / "escape.proto"), allowed_dir=root)
+            with self.assertRaisesRegex(ValueError, r"not found"):
+                MOD.validate_proto_path(str(root / "missing.proto"), allowed_dir=root)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
 
 RPC_NAMES = (
     "createIssue|updateIssue|getIssue|searchIssues|"
@@ -34,6 +35,31 @@ FORBIDDEN = [
     "Prompt Optimization API Messages",
     "prompt optimization job",
 ]
+
+
+def default_proto_dir() -> Path:
+    """Return internal/gen/mlflowpb relative to this repository."""
+    # tools/proto/strip-unused-service-apis.py → repo root → internal/gen/mlflowpb
+    return Path(__file__).resolve().parent.parent.parent / "internal" / "gen" / "mlflowpb"
+
+
+def validate_proto_path(path_arg: str, allowed_dir: Path | None = None) -> Path:
+    """Resolve and validate a CLI proto path before open/write.
+
+    Requires a .proto extension and that the resolved path stays under the
+    allowed proto directory (default: internal/gen/mlflowpb).
+    """
+    root = (allowed_dir if allowed_dir is not None else default_proto_dir()).resolve()
+    candidate = Path(path_arg).expanduser().resolve()
+    if candidate.suffix != ".proto":
+        raise ValueError(f"path must have a .proto extension: {path_arg}")
+    try:
+        candidate.relative_to(root)
+    except ValueError as err:
+        raise ValueError(f"path must be under {root}: {path_arg}") from err
+    if not candidate.is_file():
+        raise ValueError(f"proto file not found: {candidate}")
+    return candidate
 
 
 def remove_rpc_blocks(text: str) -> str:
@@ -113,7 +139,12 @@ def main() -> int:
         print(f"usage: {sys.argv[0]} <service.proto>", file=sys.stderr)
         return 2
 
-    path = sys.argv[1]
+    try:
+        path = validate_proto_path(sys.argv[1])
+    except ValueError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 2
+
     with open(path) as f:
         content = f.read()
 
