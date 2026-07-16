@@ -284,6 +284,13 @@ func (c *Client) doRawBody(ctx context.Context, method, path string, query url.V
 		req.Header.Set(k, v)
 	}
 
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", method,
+			"url", reqURL.String(),
+		)
+	}
+
 	return c.doRequestBody(req)
 }
 
@@ -309,12 +316,6 @@ func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string,
 
 func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
 	start := time.Now()
-	if c.logger != nil {
-		c.logger.Debug("request",
-			"method", req.Method,
-			"url", req.URL.String(),
-		)
-	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

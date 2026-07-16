@@ -688,3 +688,53 @@ func TestRedactAbsoluteURLForLog(t *testing.T) {
 		t.Errorf("redactAbsoluteURLForLog() = %q, want %q", got, want)
 	}
 }
+
+func TestClient_DoAbsoluteGetBody_RedactsPresignedURLInLogs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "" {
+			t.Error("request must keep presigned query params")
+		}
+		w.Write([]byte("artifact-bytes"))
+	}))
+	defer server.Close()
+
+	handler := &testLogHandler{}
+	logger := slog.New(handler)
+
+	client, err := New(Config{
+		BaseURL: "http://localhost:9999",
+		Logger:  logger,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	presignedURL := server.URL + "/object?X-Amz-Signature=secret&X-Amz-Credential=abc"
+	rc, err := client.DoAbsoluteGetBody(context.Background(), presignedURL, nil)
+	if err != nil {
+		t.Fatalf("DoAbsoluteGetBody() error = %v", err)
+	}
+	defer rc.Close()
+
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+
+	var requestLogs int
+	for _, record := range handler.records {
+		if record.Message != "request" {
+			continue
+		}
+		requestLogs++
+		urlAttr, _ := record.Attrs["url"].(string)
+		if strings.Contains(urlAttr, "X-Amz-Signature") || strings.Contains(urlAttr, "secret") {
+			t.Errorf("request log url leaked presigned query params: %q", urlAttr)
+		}
+		if !strings.HasSuffix(urlAttr, "/object") {
+			t.Errorf("request log url = %q, want host/path without query", urlAttr)
+		}
+	}
+	if requestLogs != 1 {
+		t.Fatalf("expected 1 request log, got %d", requestLogs)
+	}
+}
