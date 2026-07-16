@@ -21,7 +21,8 @@ fi
 
 # Output directory for proto files
 OUTPUT_DIR="${PROJECT_ROOT}/internal/gen/mlflowpb"
-mkdir -p "${OUTPUT_DIR}"
+ARTIFACTS_OUTPUT_DIR="${PROJECT_ROOT}/internal/gen/artifactspb"
+mkdir -p "${OUTPUT_DIR}" "${ARTIFACTS_OUTPUT_DIR}"
 
 # Base URL for raw proto files
 BASE_URL="https://raw.githubusercontent.com/mlflow/mlflow/${MLFLOW_COMMIT}/mlflow/protos"
@@ -32,11 +33,20 @@ PROTO_FILES=(
     "service.proto"
 )
 
+ARTIFACTS_PROTO_FILES=(
+    "mlflow_artifacts.proto"
+)
+
 echo "Fetching MLflow protos from commit ${MLFLOW_COMMIT}..."
 
 for proto in "${PROTO_FILES[@]}"; do
     echo "  Downloading ${proto}..."
     curl -sSfL "${BASE_URL}/${proto}" -o "${OUTPUT_DIR}/${proto}"
+done
+
+for proto in "${ARTIFACTS_PROTO_FILES[@]}"; do
+    echo "  Downloading ${proto}..."
+    curl -sSfL "${BASE_URL}/${proto}" -o "${ARTIFACTS_OUTPUT_DIR}/${proto}"
 done
 
 # Post-process: Remove scalapb import and options (Scala-specific, not needed for Go)
@@ -50,6 +60,22 @@ for proto in "${PROTO_FILES[@]}"; do
         -e '/(scalapb.message)/d' \
         "${proto_file}" > "${tmp_file}" && mv "${tmp_file}" "${proto_file}"
 done
+
+for proto in "${ARTIFACTS_PROTO_FILES[@]}"; do
+    proto_file="${ARTIFACTS_OUTPUT_DIR}/${proto}"
+    tmp_file="${proto_file}.tmp"
+    sed \
+        -e '/import "scalapb\/scalapb.proto";/d' \
+        -e '/option (scalapb/d' \
+        -e '/(scalapb.message)/d' \
+        "${proto_file}" > "${tmp_file}" && mv "${tmp_file}" "${proto_file}"
+done
+
+# Remove optional dependencies not needed by the Go SDK to avoid import cycles.
+if [[ -f "${OUTPUT_DIR}/service.proto" ]]; then
+    echo "  Post-processing: removing issues and prompt optimization from service.proto..."
+    python3 "${SCRIPT_DIR}/strip-unused-service-apis.py" "${OUTPUT_DIR}/service.proto"
+fi
 
 # Post-process service.proto: remove error_codes array blocks that protoc can't parse
 # (our databricks.proto stub defines error_codes as string, not repeated enum)

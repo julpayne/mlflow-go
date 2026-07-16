@@ -508,6 +508,29 @@ service MlflowService {
     option (graphql) = {};
   }
 
+  // Generate a presigned URL for uploading an artifact directly to cloud storage.
+  // The server uses its own credentials to sign the URL, enabling clients to upload
+  // artifacts without needing direct cloud storage write permissions.
+  //
+  // Consumed by external artifact repository plugins
+  // (e.g. https://github.com/aws/sagemaker-mlflow).
+  rpc createPresignedUploadUrl(CreatePresignedUploadUrl) returns (CreatePresignedUploadUrl.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/artifacts/presigned-upload-url"
+          since: {
+            major: 2
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Create Presigned Upload URL"
+    };
+  }
+
   // Get a list of all values for the specified metric for a given run.
   //
   rpc getMetricHistory(GetMetricHistory) returns (GetMetricHistory.Response) {
@@ -796,6 +819,25 @@ service MlflowService {
     };
   }
 
+  // Batch get trace metadata (TraceInfoV3) without loading span data.
+  // Uses POST to avoid URL length limits with many trace IDs.
+  rpc batchGetTraceInfos(BatchGetTraceInfos) returns (BatchGetTraceInfos.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/traces/batchGetInfos"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Batch Get Trace Infos"
+    };
+  }
+
   // DEPRECATED. Use searchTracesV3 instead.
   rpc searchTraces(SearchTraces) returns (SearchTraces.Response) {
     option (rpc) = {
@@ -977,6 +1019,111 @@ service MlflowService {
       ]
       visibility: PUBLIC_UNDOCUMENTED
       rpc_doc_title: "Calculate Trace Filter Correlation"
+    };
+  }
+
+  // Query aggregated metrics for traces, spans, or assessments.
+  // Supports grouping by dimensions and time-based aggregation.
+  rpc queryTraceMetrics(QueryTraceMetrics) returns (QueryTraceMetrics.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/traces/metrics"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Query Trace Metrics"
+    };
+  }
+
+  // Workspace APIs
+  rpc listWorkspaces(ListWorkspaces) returns (ListWorkspaces.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/workspaces"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "List Workspaces"
+    };
+  }
+
+  rpc createWorkspace(CreateWorkspace) returns (CreateWorkspace.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/workspaces"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Create Workspace"
+    };
+  }
+
+  rpc getWorkspace(GetWorkspace) returns (GetWorkspace.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/workspaces/{workspace_name}"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Get Workspace"
+    };
+  }
+
+  rpc updateWorkspace(UpdateWorkspace) returns (UpdateWorkspace.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "PATCH"
+          path: "/mlflow/workspaces/{workspace_name}"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Update Workspace"
+    };
+  }
+
+  rpc deleteWorkspace(DeleteWorkspace) returns (DeleteWorkspace.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "DELETE"
+          path: "/mlflow/workspaces/{workspace_name}"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Delete Workspace"
     };
   }
 
@@ -1473,6 +1620,24 @@ service MlflowService {
     };
   }
 
+  // Delete evaluation dataset records
+  rpc deleteDatasetRecords(DeleteDatasetRecords) returns (DeleteDatasetRecords.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "DELETE"
+          path: "/mlflow/datasets/{dataset_id}/records"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC_UNDOCUMENTED
+      rpc_doc_title: "Delete Evaluation Dataset Records"
+    };
+  }
+
   // Add a dataset to additional experiments
   rpc addDatasetToExperiments(AddDatasetToExperiments) returns (AddDatasetToExperiments.Response) {
     option (rpc) = {
@@ -1912,6 +2077,259 @@ service MlflowService {
       ]
       visibility: PUBLIC
       rpc_doc_title: "Gateway Delete Endpoint Tag"
+    };
+  }
+
+  // ==================== Budget Policy APIs ====================
+
+  // Create a new budget policy
+  rpc createBudgetPolicy(CreateGatewayBudgetPolicy) returns (CreateGatewayBudgetPolicy.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/gateway/budgets/create"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Create Budget Policy"
+    };
+  }
+
+  // Get a budget policy by ID
+  rpc getBudgetPolicy(GetGatewayBudgetPolicy) returns (GetGatewayBudgetPolicy.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/gateway/budgets/get"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Get Budget Policy"
+    };
+  }
+
+  // Update a budget policy
+  rpc updateBudgetPolicy(UpdateGatewayBudgetPolicy) returns (UpdateGatewayBudgetPolicy.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/gateway/budgets/update"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Update Budget Policy"
+    };
+  }
+
+  // Delete a budget policy
+  rpc deleteBudgetPolicy(DeleteGatewayBudgetPolicy) returns (DeleteGatewayBudgetPolicy.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "DELETE"
+          path: "/mlflow/gateway/budgets/delete"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Delete Budget Policy"
+    };
+  }
+
+  // List budget policies
+  rpc listBudgetPolicies(ListGatewayBudgetPolicies) returns (ListGatewayBudgetPolicies.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/gateway/budgets/list"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "List Budget Policies"
+    };
+  }
+
+  // List budget windows with current spending
+  rpc listBudgetWindows(ListGatewayBudgetWindows) returns (ListGatewayBudgetWindows.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/gateway/budgets/windows"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "List Budget Windows"
+    };
+  }
+
+  // Create a new guardrail backed by a scorer
+  rpc createGatewayGuardrail(CreateGatewayGuardrail) returns (CreateGatewayGuardrail.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/gateway/guardrails/create"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Create Guardrail"
+    };
+  }
+
+  // Get a guardrail by ID
+  rpc getGatewayGuardrail(GetGatewayGuardrail) returns (GetGatewayGuardrail.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/gateway/guardrails/get"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Get Guardrail"
+    };
+  }
+
+  // Delete a guardrail
+  rpc deleteGatewayGuardrail(DeleteGatewayGuardrail) returns (DeleteGatewayGuardrail.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "DELETE"
+          path: "/mlflow/gateway/guardrails/delete"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Delete Guardrail"
+    };
+  }
+
+  // List guardrails
+  rpc listGatewayGuardrails(ListGatewayGuardrails) returns (ListGatewayGuardrails.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/gateway/guardrails/list"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "List Guardrails"
+    };
+  }
+
+  // Add a guardrail to a gateway endpoint
+  rpc addGuardrailToEndpoint(AddGuardrailToEndpoint) returns (AddGuardrailToEndpoint.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "POST"
+          path: "/mlflow/gateway/guardrails/add-to-endpoint"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Add Guardrail to Endpoint"
+    };
+  }
+
+  // Remove a guardrail from a gateway endpoint
+  rpc removeGuardrailFromEndpoint(RemoveGuardrailFromEndpoint) returns (RemoveGuardrailFromEndpoint.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "DELETE"
+          path: "/mlflow/gateway/guardrails/remove-from-endpoint"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Remove Guardrail from Endpoint"
+    };
+  }
+
+  // List guardrail configs for an endpoint
+  rpc listEndpointGuardrailConfigs(ListEndpointGuardrailConfigs) returns (ListEndpointGuardrailConfigs.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "GET"
+          path: "/mlflow/gateway/guardrails/list-for-endpoint"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "List Endpoint Guardrail Configs"
+    };
+  }
+
+  rpc updateEndpointGuardrailConfig(UpdateEndpointGuardrailConfig) returns (UpdateEndpointGuardrailConfig.Response) {
+    option (rpc) = {
+      endpoints: [
+        {
+          method: "PATCH"
+          path: "/mlflow/gateway/guardrails/update-config"
+          since: {
+            major: 3
+            minor: 0
+          }
+        }
+      ]
+      visibility: PUBLIC
+      rpc_doc_title: "Update Endpoint Guardrail Config"
     };
   }
 }
@@ -2554,6 +2972,27 @@ message ListArtifacts {
   }
 }
 
+message CreatePresignedUploadUrl {
+
+  // Run ID that owns the artifact. Must be provided.
+  optional string run_id = 1;
+
+  // Relative path within the run's artifact directory (e.g. "models/model.pkl").
+  // Must be provided.
+  optional string path = 2;
+
+  // URL expiration time in seconds (default: 900).
+  optional int64 expiration = 3;
+
+  message Response {
+    // Presigned URL for direct artifact upload.
+    optional string presigned_url = 1;
+
+    // Required headers for the upload request (e.g. Content-Type).
+    map<string, string> headers = 2;
+  }
+}
+
 // Metadata of a single artifact file or directory.
 message FileInfo {
   // Path relative to the root artifact directory run.
@@ -2879,6 +3318,17 @@ message BatchGetTraces {
   }
 }
 
+message BatchGetTraceInfos {
+
+  // IDs of the traces to fetch. Must be provided.
+  repeated string trace_ids = 1;
+
+  message Response {
+    // The fetched trace metadata.
+    repeated TraceInfoV3 trace_infos = 1;
+  }
+}
+
 message GetTrace {
 
   // ID of the trace to fetch. Must be provided.
@@ -3048,6 +3498,110 @@ message CalculateTraceFilterCorrelation {
     // Total number of traces in the experiments.
     optional int32 total_count = 6;
   }
+}
+
+// View type for metrics aggregation.
+enum MetricViewType {
+  // Aggregate at trace level.
+  TRACES = 1;
+  // Aggregate at span level.
+  SPANS = 2;
+  // Aggregate at assessment level.
+  ASSESSMENTS = 3;
+}
+
+// Aggregation type for metrics.
+enum AggregationType {
+  // Count of entities.
+  COUNT = 1;
+  // Sum of values.
+  SUM = 2;
+  // Average of values.
+  AVG = 3;
+  // Percentile aggregation (requires percentile_value parameter).
+  PERCENTILE = 4;
+  // Minimum value.
+  MIN = 5;
+  // Maximum value.
+  MAX = 6;
+}
+
+message MetricAggregation {
+  // The type of aggregation to perform.
+  optional AggregationType aggregation_type = 1;
+
+  // The percentile value to compute (0-100), required when aggregation_type is PERCENTILE.
+  // Examples: 50 (median), 75, 90, 95, 99.
+  // This field is ignored for other aggregation types.
+  optional double percentile_value = 2;
+}
+
+// Query aggregated metrics for traces, spans, or assessments.
+message QueryTraceMetrics {
+
+  // Required: The experiment IDs to search traces.
+  repeated string experiment_ids = 1;
+
+  // Required: The level at which to aggregate metrics.
+  optional MetricViewType view_type = 2;
+
+  // Required: The name of the metric to query (e.g. "latency").
+  optional string metric_name = 3;
+
+  // Required: The aggregations to apply.
+  repeated MetricAggregation aggregations = 4;
+
+  // Optional: Dimensions to group metrics by. (e.g. "name", "status")
+  repeated string dimensions = 5;
+
+  // Optional: Filter expressions to apply. (e.g. `trace.status="OK"`)
+  repeated string filters = 6;
+
+  // Optional: Time interval for grouping in seconds.
+  // When set, results automatically include a time dimension grouped by
+  // the specified interval.
+  // Examples: 60 (minute), 3600 (hour), 86400 (day), 604800 (week), 2592000 (month).
+  optional int64 time_interval_seconds = 7;
+
+  // Optional: Start of time range in milliseconds since epoch.
+  // Required if time_interval_seconds is set.
+  optional int64 start_time_ms = 8;
+
+  // Optional: End of time range in milliseconds since epoch.
+  // Required if time_interval_seconds is set.
+  optional int64 end_time_ms = 9;
+
+  // Optional: Maximum number of data points to return.
+  // Default: 1000
+  optional int32 max_results = 10 [default = 1000];
+
+  // Optional: Pagination token for fetching the next page of results.
+  optional string page_token = 11;
+
+  message Response {
+    // Data points grouped by dimensions.
+    repeated MetricDataPoint data_points = 1;
+
+    // Pagination token for fetching the next page.
+    // Empty if no more results are available.
+    optional string next_page_token = 2;
+  }
+}
+
+// A single data point with dimension values and metric values.
+message MetricDataPoint {
+  // Metric name, e.g. "latency"
+  optional string metric_name = 1;
+
+  // Dimension values for this data point
+  // Keys correspond to dimensions
+  // e.g., {"status": "OK"}
+  map<string, string> dimensions = 2;
+
+  // Metric values for this data point
+  // Keys are aggregation types
+  // e.g., {"AVG": 150, "P99": 234.5}
+  map<string, double> values = 3;
 }
 
 message SetTraceTag {
@@ -3741,6 +4295,20 @@ message GetDatasetRecords {
   }
 }
 
+message DeleteDatasetRecords {
+
+  // Dataset ID to delete records from.
+  optional string dataset_id = 1 [(validate_required) = true];
+
+  // List of dataset record IDs to delete.
+  repeated string dataset_record_ids = 2;
+
+  message Response {
+    // Number of records deleted
+    optional int32 deleted_count = 1;
+  }
+}
+
 message AddDatasetToExperiments {
 
   // Dataset ID to add to experiments
@@ -3894,8 +4462,8 @@ message GatewaySecretInfo {
   optional string created_by = 7;
   // User ID who last updated the secret
   optional string last_updated_by = 8;
-  // Provider-specific auth configuration as JSON (e.g., region, project_id)
-  optional string auth_config_json = 9;
+  // Provider-specific auth configuration (e.g., auth_mode, region, project_id)
+  map<string, string> auth_config = 9;
 }
 
 // Reusable model definition that can be shared across endpoints
@@ -3939,6 +4507,10 @@ message GatewayEndpointModelMapping {
   optional int64 created_at = 6;
   // User ID who created the mapping
   optional string created_by = 7;
+  // Type of linkage
+  optional GatewayModelLinkageType linkage_type = 8;
+  // Order for fallback attempts (only for FALLBACK linkages, NULL for PRIMARY)
+  optional int32 fallback_order = 9;
 }
 
 // Endpoint entity representing an LLM gateway endpoint
@@ -3959,6 +4531,16 @@ message GatewayEndpoint {
   optional string last_updated_by = 7;
   // Tags associated with the endpoint
   repeated GatewayEndpointTag tags = 8;
+  // Routing strategy for the endpoint
+  optional RoutingStrategy routing_strategy = 9;
+  // Fallback configuration (populated if routing_strategy is FALLBACK)
+  optional FallbackConfig fallback_config = 10;
+  // ID of the MLflow experiment where traces for this endpoint are logged
+  optional string experiment_id = 11;
+  // Whether usage tracking is enabled for this endpoint.
+  // When true, an experiment will be auto-created if not provided,
+  // and traces will be logged for endpoint invocations.
+  optional bool usage_tracking = 12;
 }
 
 // Tag associated with an endpoint
@@ -3974,7 +4556,7 @@ message GatewayEndpointTag {
 message GatewayEndpointBinding {
   // ID of the endpoint this binding references
   optional string endpoint_id = 1;
-  // Type of MLflow resource (e.g., "scorer_job")
+  // Type of MLflow resource (e.g., "scorer")
   optional string resource_type = 2;
   // ID of the specific resource instance
   optional string resource_id = 3;
@@ -3987,6 +4569,8 @@ message GatewayEndpointBinding {
   // User ID who last updated the binding
   optional string last_updated_by = 7;
   // Fields 8-9 reserved - endpoint_name and model_mappings removed (join client-side)
+  // Human-readable display name for the resource (e.g., scorer name)
+  optional string display_name = 10;
 }
 
 // ========== Secrets API Messages ==========
@@ -4000,12 +4584,12 @@ message CreateGatewaySecret {
   map<string, string> secret_value = 2;
   // Optional LLM provider (e.g., "openai", "anthropic")
   optional string provider = 3;
-  // Reserved: credential_name was removed - auth_mode is now stored in auth_config_json
+  // Reserved: credential_name was removed - auth_mode is now stored in auth_config
   reserved 4;
   reserved "credential_name";
-  // Optional provider-specific auth configuration as JSON string.
+  // Optional provider-specific auth configuration.
   // For multi-auth providers, include "auth_mode" key (e.g., {"auth_mode": "access_keys", "aws_region_name": "us-east-1"})
-  optional string auth_config_json = 5;
+  map<string, string> auth_config = 5;
   // Username of the creator
   optional string created_by = 6;
 
@@ -4033,12 +4617,12 @@ message UpdateGatewaySecret {
   // For simple API keys: {"api_key": "sk-xxx"}
   // For compound credentials: {"aws_access_key_id": "...", "aws_secret_access_key": "..."}
   map<string, string> secret_value = 2;
-  // Reserved: credential_name was removed - auth_mode is now stored in auth_config_json
+  // Reserved: credential_name was removed - auth_mode is now stored in auth_config
   reserved 3;
   reserved "credential_name";
-  // Optional new auth configuration as JSON string.
+  // Optional new auth configuration.
   // For multi-auth providers, include "auth_mode" key (e.g., {"auth_mode": "access_keys", "aws_region_name": "us-east-1"})
-  optional string auth_config_json = 4;
+  map<string, string> auth_config = 4;
   // Username of the updater
   optional string updated_by = 5;
 
@@ -4136,13 +4720,118 @@ message DeleteGatewayModelDefinition {
 
 // ========== Endpoints API Messages ==========
 
+// Routing strategy for endpoints
+enum RoutingStrategy {
+  ROUTING_STRATEGY_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  // Request-based traffic split: distributes traffic based on weights
+  REQUEST_BASED_TRAFFIC_SPLIT = 1;
+}
+
+// Fallback strategy for routing (future-proof for additional strategies)
+enum FallbackStrategy {
+  FALLBACK_STRATEGY_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  // Sequential fallback: tries models in the order specified
+  SEQUENTIAL = 1;
+}
+
+// Type of linkage between endpoint and model definition
+enum GatewayModelLinkageType {
+  LINKAGE_TYPE_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  // Primary linkage: used for routing traffic
+  PRIMARY = 1;
+  // Fallback linkage: used for failover
+  FALLBACK = 2;
+}
+
+// Duration unit for budget policy fixed windows
+enum BudgetDurationUnit {
+  DURATION_UNIT_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  MINUTES = 1;
+  HOURS = 2;
+  DAYS = 3;
+  WEEKS = 4;
+  MONTHS = 5;
+}
+
+// Target scope for a budget policy
+enum BudgetTargetScope {
+  TARGET_SCOPE_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  GLOBAL = 1;
+  WORKSPACE = 2;
+}
+
+// Action to take when a budget is exceeded
+enum BudgetAction {
+  BUDGET_ACTION_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  ALERT = 1;
+  REJECT = 2;
+}
+
+// Budget measurement unit
+enum BudgetUnit {
+  BUDGET_UNIT_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  USD = 1;
+}
+
+// Whether a guardrail runs before or after LLM invocation
+enum GuardrailStage {
+  GUARDRAIL_STAGE_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  BEFORE = 1;
+  AFTER = 2;
+}
+
+// Whether a guardrail blocks or modifies the request/response
+enum GuardrailAction {
+  GUARDRAIL_ACTION_UNSPECIFIED = 0 [(enum_value_visibility) = PUBLIC_UNDOCUMENTED];
+  VALIDATION = 1;
+  SANITIZATION = 2;
+}
+
+// Fixed window duration: a (unit, value) pair that defines how long a budget window is
+message BudgetDuration {
+  // Unit of time (MINUTES, HOURS, DAYS, WEEKS, MONTHS)
+  optional BudgetDurationUnit unit = 1;
+  // Number of units per window
+  optional int32 value = 2;
+}
+
+// Configuration for fallback routing
+message FallbackConfig {
+  // The fallback strategy.
+  optional FallbackStrategy strategy = 1;
+  // The max attempts for fallback routing (cannot exceed number of destinations).
+  optional int32 max_attempts = 2;
+}
+
+// Configuration for a model attached to an endpoint
+message GatewayEndpointModelConfig {
+  // ID of the model definition
+  optional string model_definition_id = 1;
+  // Type of linkage
+  optional GatewayModelLinkageType linkage_type = 2;
+  // Routing weight for traffic distribution
+  optional float weight = 3;
+  // Order for fallback attempts (only for FALLBACK linkages, NULL for PRIMARY)
+  optional int32 fallback_order = 4;
+}
+
 message CreateGatewayEndpoint {
   // Optional user-friendly name for the endpoint
   optional string name = 1;
-  // List of model definition IDs to attach to this endpoint
-  repeated string model_definition_ids = 2;
+  // List of model configurations
+  repeated GatewayEndpointModelConfig model_configs = 2;
   // Username of the creator
   optional string created_by = 3;
+  // Optional routing strategy for the endpoint
+  optional RoutingStrategy routing_strategy = 4;
+  // Optional fallback configuration (includes strategy, max_attempts)
+  optional FallbackConfig fallback_config = 5;
+  // Optional experiment ID for tracing. Only used when usage_tracking is true.
+  // If not provided and usage_tracking is true, an experiment will be auto-created.
+  optional string experiment_id = 6;
+  // Whether to enable usage tracking for this endpoint. Defaults to false.
+  // When true, traces will be logged for endpoint invocations.
+  optional bool usage_tracking = 7;
 
   message Response {
     // The created endpoint with all model mappings
@@ -4168,6 +4857,18 @@ message UpdateGatewayEndpoint {
   optional string name = 2;
   // Username of the updater
   optional string updated_by = 3;
+  // Optional new list of model configurations (replaces all existing model linkages)
+  repeated GatewayEndpointModelConfig model_configs = 4;
+  // Optional new routing strategy for the endpoint
+  optional RoutingStrategy routing_strategy = 5;
+  // Optional fallback configuration (includes strategy, max_attempts)
+  optional FallbackConfig fallback_config = 6;
+  // Optional experiment ID for tracing. Only used when usage_tracking is true.
+  optional string experiment_id = 7;
+  // Whether to enable usage tracking for this endpoint.
+  // When set to true, traces will be logged for endpoint invocations.
+  // When set to false, usage tracking is disabled and experiment_id is cleared.
+  optional bool usage_tracking = 8;
 
   message Response {
     // The updated endpoint
@@ -4199,12 +4900,10 @@ message ListGatewayEndpoints {
 message AttachModelToGatewayEndpoint {
   // ID of the endpoint to attach the model to
   optional string endpoint_id = 1;
-  // ID of the model definition to attach
-  optional string model_definition_id = 2;
-  // Optional routing weight (default 1)
-  optional float weight = 3;
+  // Configuration for the model to attach
+  optional GatewayEndpointModelConfig model_config = 2;
   // Username of the creator
-  optional string created_by = 4;
+  optional string created_by = 3;
 
   message Response {
     // The created mapping
@@ -4253,7 +4952,7 @@ message DeleteGatewayEndpointBinding {
 message ListGatewayEndpointBindings {
   // ID of the endpoint to list bindings for
   optional string endpoint_id = 1;
-  // Type of resource to filter bindings by (e.g., "scorer_job")
+  // Type of resource to filter bindings by (e.g., "scorer")
   optional string resource_type = 2;
   // ID of the resource to filter bindings by
   optional string resource_id = 3;
@@ -4284,6 +4983,237 @@ message DeleteGatewayEndpointTag {
   message Response {}
 }
 
+// ========== Budget Policy API Messages ==========
+
+// Represents a budget policy for the AI Gateway
+message GatewayBudgetPolicy {
+  // Unique identifier for this budget policy
+  optional string budget_policy_id = 1;
+  // Budget measurement unit (e.g. USD)
+  optional BudgetUnit budget_unit = 2;
+  // Budget limit amount
+  optional double budget_amount = 3;
+  // Fixed time window (unit + length pair)
+  optional BudgetDuration duration = 4;
+  // Scope of the budget (GLOBAL or WORKSPACE)
+  optional BudgetTargetScope target_scope = 5;
+  // Action when budget is exceeded
+  optional BudgetAction budget_action = 6;
+  // User ID who created the policy
+  optional string created_by = 7;
+  // Creation timestamp in milliseconds
+  optional int64 created_at = 8;
+  // User ID who last updated the policy
+  optional string last_updated_by = 9;
+  // Last update timestamp in milliseconds
+  optional int64 last_updated_at = 10;
+}
+
+message CreateGatewayBudgetPolicy {
+  optional BudgetUnit budget_unit = 1;
+  optional double budget_amount = 2;
+  optional BudgetDuration duration = 3;
+  optional BudgetTargetScope target_scope = 4;
+  optional BudgetAction budget_action = 5;
+  optional string created_by = 6;
+
+  message Response {
+    optional GatewayBudgetPolicy budget_policy = 1;
+  }
+}
+
+message GetGatewayBudgetPolicy {
+  optional string budget_policy_id = 1;
+
+  message Response {
+    optional GatewayBudgetPolicy budget_policy = 1;
+  }
+}
+
+message UpdateGatewayBudgetPolicy {
+  optional string budget_policy_id = 1;
+  optional BudgetUnit budget_unit = 2;
+  optional double budget_amount = 3;
+  optional BudgetDuration duration = 4;
+  optional BudgetTargetScope target_scope = 5;
+  optional BudgetAction budget_action = 6;
+  optional string updated_by = 7;
+
+  message Response {
+    optional GatewayBudgetPolicy budget_policy = 1;
+  }
+}
+
+message DeleteGatewayBudgetPolicy {
+  optional string budget_policy_id = 1;
+
+  message Response {}
+}
+
+message ListGatewayBudgetPolicies {
+  optional int64 max_results = 1;
+
+  optional string page_token = 2;
+
+  message Response {
+    repeated GatewayBudgetPolicy budget_policies = 1;
+
+    optional string next_page_token = 2;
+  }
+}
+
+message ListGatewayBudgetWindows {
+  message BudgetWindow {
+    optional string budget_policy_id = 1;
+
+    optional int64 window_start_ms = 2;
+
+    optional int64 window_end_ms = 3;
+
+    optional double current_spend = 4;
+  }
+
+  message Response {
+    repeated BudgetWindow windows = 1;
+  }
+}
+
+// ========== Gateway Guardrails API Messages ==========
+
+message GatewayGuardrail {
+  optional string guardrail_id = 1;
+
+  optional string name = 2;
+
+  optional Scorer scorer = 3;
+
+  optional GuardrailStage stage = 4;
+
+  optional GuardrailAction action = 5;
+
+  // Optional gateway endpoint ID for the LLM used by the action (e.g. sanitization).
+  optional string action_endpoint_id = 6;
+
+  optional string created_by = 7;
+
+  optional int64 created_at = 8;
+
+  optional string last_updated_by = 9;
+
+  optional int64 last_updated_at = 10;
+}
+
+message GatewayGuardrailConfig {
+  optional string endpoint_id = 1;
+
+  optional string guardrail_id = 2;
+
+  optional int64 execution_order = 3;
+
+  optional string created_by = 4;
+
+  optional int64 created_at = 5;
+
+  // The full guardrail entity, populated when listing configs.
+  optional GatewayGuardrail guardrail = 6;
+}
+
+message CreateGatewayGuardrail {
+
+  optional string name = 1;
+
+  optional string scorer_id = 2;
+
+  optional int64 scorer_version = 3;
+
+  optional GuardrailStage stage = 4;
+
+  optional GuardrailAction action = 5;
+
+  // Optional gateway endpoint ID for the LLM used by the action.
+  optional string action_endpoint_id = 6;
+
+  message Response {
+    optional GatewayGuardrail guardrail = 1;
+  }
+}
+
+message GetGatewayGuardrail {
+
+  optional string guardrail_id = 1;
+
+  message Response {
+    optional GatewayGuardrail guardrail = 1;
+  }
+}
+
+message DeleteGatewayGuardrail {
+
+  optional string guardrail_id = 1;
+
+  message Response {}
+}
+
+message ListGatewayGuardrails {
+
+  optional int64 max_results = 1;
+
+  optional string page_token = 2;
+
+  message Response {
+    repeated GatewayGuardrail guardrails = 1;
+
+    optional string next_page_token = 2;
+  }
+}
+
+message AddGuardrailToEndpoint {
+
+  optional string endpoint_id = 1;
+
+  optional string guardrail_id = 2;
+
+  optional int64 execution_order = 3;
+
+  message Response {
+    optional GatewayGuardrailConfig config = 1;
+  }
+}
+
+message RemoveGuardrailFromEndpoint {
+
+  optional string endpoint_id = 1;
+
+  optional string guardrail_id = 2;
+
+  message Response {}
+}
+
+message ListEndpointGuardrailConfigs {
+
+  optional string endpoint_id = 1;
+
+  message Response {
+    repeated GatewayGuardrailConfig configs = 1;
+  }
+}
+
+message UpdateEndpointGuardrailConfig {
+
+  // The endpoint ID.
+  optional string endpoint_id = 1;
+
+  // The guardrail ID.
+  optional string guardrail_id = 2;
+
+  // The new execution order.
+  optional int64 execution_order = 3;
+
+  message Response {
+    optional GatewayGuardrailConfig config = 1;
+  }
+}
+
 // ========== Secrets Configuration API Messages ==========
 
 message GetSecretsConfig {
@@ -4291,4 +5221,86 @@ message GetSecretsConfig {
     // Whether the server is configured to handle secrets (encryption available)
     optional bool secrets_available = 1;
   }
+}
+
+// =============================================================================
+// Workspace Management Messages
+// =============================================================================
+
+// Workspace metadata returned by workspace APIs.
+message Workspace {
+  // The unique workspace name.
+  optional string name = 1 [(validate_required) = true];
+
+  // Optional workspace description.
+  optional string description = 2;
+
+  // Optional default artifact root override for this workspace.
+  optional string default_artifact_root = 3;
+}
+
+// List workspaces available to the current principal.
+message ListWorkspaces {
+
+  message Response {
+    // Collection of workspace records.
+    repeated Workspace workspaces = 1;
+  }
+}
+
+// Create a new workspace.
+message CreateWorkspace {
+
+  // Workspace name to create.
+  optional string name = 1 [(validate_required) = true];
+
+  // Optional workspace description.
+  optional string description = 2;
+
+  // Optional default artifact root override to apply at creation time.
+  optional string default_artifact_root = 3;
+
+  message Response {
+    // Metadata describing the created workspace.
+    optional Workspace workspace = 1;
+  }
+}
+
+// Retrieve workspace metadata.
+message GetWorkspace {
+
+  // Name of the workspace to fetch.
+  optional string workspace_name = 1 [(validate_required) = true];
+
+  message Response {
+    // Metadata describing the requested workspace.
+    optional Workspace workspace = 1;
+  }
+}
+
+// Update workspace metadata.
+message UpdateWorkspace {
+
+  // Name of the workspace to update.
+  optional string workspace_name = 1 [(validate_required) = true];
+
+  // Optional description update.
+  optional string description = 2;
+
+  // Optional default artifact root override update.
+  optional string default_artifact_root = 3;
+
+  message Response {
+    // Metadata describing the updated workspace.
+    optional Workspace workspace = 1;
+  }
+}
+
+// Delete a workspace.
+message DeleteWorkspace {
+
+  // Name of the workspace to delete.
+  optional string workspace_name = 1 [(validate_required) = true];
+
+  message Response {}
 }

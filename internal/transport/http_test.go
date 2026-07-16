@@ -3,10 +3,12 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -491,5 +493,279 @@ func TestCustomHeadersWithToken(t *testing.T) {
 	}
 	if got := receivedHeaders.Get("X-MLFLOW-WORKSPACE"); got != "team-dora" {
 		t.Errorf("X-MLFLOW-WORKSPACE = %q, want %q", got, "team-dora")
+	}
+}
+
+func TestClient_GetBytes_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if r.Header.Get("Accept") == "application/json" {
+			t.Error("GetBytes should not set Accept: application/json")
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write([]byte("artifact-data"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data, contentType, err := client.GetBytes(context.Background(), "/api/artifacts/file", nil)
+	if err != nil {
+		t.Fatalf("GetBytes() error = %v", err)
+	}
+	if string(data) != "artifact-data" {
+		t.Errorf("data = %q, want artifact-data", string(data))
+	}
+	if contentType != "application/octet-stream" {
+		t.Errorf("contentType = %q, want application/octet-stream", contentType)
+	}
+}
+
+func TestClient_GetBody_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		w.Write([]byte("stream-data"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBody(context.Background(), "/api/artifacts/file", nil)
+	if err != nil {
+		t.Fatalf("GetBody() error = %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(data) != "stream-data" {
+		t.Errorf("data = %q, want stream-data", string(data))
+	}
+}
+
+func TestClient_PutBytes_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "upload-data" {
+			t.Errorf("body = %q, want upload-data", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutBytes(context.Background(), "/api/artifacts/file", []byte("upload-data"), "application/octet-stream")
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+}
+
+func TestClient_PostBytes_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Query().Get("run_uuid") != "run-1" {
+			t.Errorf("run_uuid = %q, want run-1", r.URL.Query().Get("run_uuid"))
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "text/plain" {
+			t.Errorf("Content-Type = %q, want text/plain", ct)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "post-data" {
+			t.Errorf("body = %q, want post-data", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	query := url.Values{"run_uuid": []string{"run-1"}}
+	err = client.PostBytes(context.Background(), "/upload", query, []byte("post-data"), "text/plain")
+	if err != nil {
+		t.Fatalf("PostBytes() error = %v", err)
+	}
+}
+
+func TestClient_GetBytes_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error_code": "RESOURCE_DOES_NOT_EXIST",
+			"message":    "Artifact not found",
+		})
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, _, err = client.GetBytes(context.Background(), "/api/artifacts/missing", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.IsNotFound(err) {
+		t.Errorf("expected IsNotFound, got %v", err)
+	}
+}
+
+func TestClient_DoAbsolute_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		if r.Header.Get("X-Amz-Signature") != "abc123" {
+			t.Errorf("expected X-Amz-Signature header")
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "presigned-upload" {
+			t.Errorf("body = %q, want presigned-upload", string(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: "http://localhost:9999"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data, _, err := client.DoAbsolute(
+		context.Background(),
+		http.MethodPut,
+		server.URL+"/presigned",
+		map[string]string{"X-Amz-Signature": "abc123", "Content-Type": "application/octet-stream"},
+		[]byte("presigned-upload"),
+	)
+	if err != nil {
+		t.Fatalf("DoAbsolute() error = %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected empty response body, got %q", string(data))
+	}
+}
+
+func TestReadResponseBody_ExceedsLimit(t *testing.T) {
+	_, err := readResponseBody(strings.NewReader(strings.Repeat("a", maxResponseBodySize+1)))
+	if err == nil {
+		t.Fatal("expected error for oversized body, got nil")
+	}
+}
+
+func TestLimitedReadCloser_CopyStopsAtLimit(t *testing.T) {
+	const limit int64 = 8
+	body := io.NopCloser(strings.NewReader(strings.Repeat("x", int(limit)+4)))
+	rc := newLimitedReadCloser(body, limit)
+
+	var buf strings.Builder
+	n, err := io.Copy(&buf, rc)
+	if err == nil {
+		t.Fatal("expected size error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("error = %v, want exceeds maximum size", err)
+	}
+	if n != limit {
+		t.Fatalf("copied %d bytes, want %d", n, limit)
+	}
+	if int64(buf.Len()) != limit {
+		t.Fatalf("buffer len = %d, want %d", buf.Len(), limit)
+	}
+
+	// Subsequent reads must keep reporting the exceeded error with no extra bytes.
+	extra := make([]byte, 4)
+	n2, err2 := rc.Read(extra)
+	if n2 != 0 {
+		t.Fatalf("subsequent Read returned %d bytes, want 0", n2)
+	}
+	if err2 == nil || !strings.Contains(err2.Error(), "exceeds maximum size") {
+		t.Fatalf("subsequent Read error = %v, want exceeds maximum size", err2)
+	}
+}
+
+func TestRedactAbsoluteURLForLog(t *testing.T) {
+	got := redactAbsoluteURLForLog("https://storage.example.com/object?X-Amz-Signature=secret&X-Amz-Credential=abc")
+	want := "https://storage.example.com/object"
+	if got != want {
+		t.Errorf("redactAbsoluteURLForLog() = %q, want %q", got, want)
+	}
+}
+
+func TestClient_DoAbsoluteGetBody_RedactsPresignedURLInLogs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "" {
+			t.Error("request must keep presigned query params")
+		}
+		w.Write([]byte("artifact-bytes"))
+	}))
+	defer server.Close()
+
+	handler := &testLogHandler{}
+	logger := slog.New(handler)
+
+	client, err := New(Config{
+		BaseURL: "http://localhost:9999",
+		Logger:  logger,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	presignedURL := server.URL + "/object?X-Amz-Signature=secret&X-Amz-Credential=abc"
+	rc, err := client.DoAbsoluteGetBody(context.Background(), presignedURL, nil)
+	if err != nil {
+		t.Fatalf("DoAbsoluteGetBody() error = %v", err)
+	}
+	defer rc.Close()
+
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+
+	var requestLogs int
+	for _, record := range handler.records {
+		if record.Message != "request" {
+			continue
+		}
+		requestLogs++
+		urlAttr, _ := record.Attrs["url"].(string)
+		if strings.Contains(urlAttr, "X-Amz-Signature") || strings.Contains(urlAttr, "secret") {
+			t.Errorf("request log url leaked presigned query params: %q", urlAttr)
+		}
+		if !strings.HasSuffix(urlAttr, "/object") {
+			t.Errorf("request log url = %q, want host/path without query", urlAttr)
+		}
+	}
+	if requestLogs != 1 {
+		t.Fatalf("expected 1 request log, got %d", requestLogs)
 	}
 }
