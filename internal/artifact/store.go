@@ -36,7 +36,9 @@ type UploadOptions struct {
 	Expiration  int64
 }
 
-// Upload uploads artifact bytes for a run, preferring presigned URLs when available.
+// Upload uploads artifact bytes for a run.
+// Local filesystem roots use tracking-server routes; otherwise presigned URLs
+// are preferred with mlflow-artifacts proxy fallback.
 func (s *Store) Upload(ctx context.Context, runID, artifactURI, artifactPath string, content []byte, opts UploadOptions) error {
 	if runID == "" {
 		return fmt.Errorf("mlflow: run ID is required")
@@ -48,6 +50,16 @@ func (s *Store) Upload(ctx context.Context, runID, artifactURI, artifactPath str
 	contentType := opts.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
+	}
+
+	// Local filesystem artifact roots use tracking-server routes only; skip
+	// presigned so a 5xx/timeout there cannot block a working upload path.
+	if SupportsTrackingServerArtifacts(artifactURI) {
+		if err := s.uploadViaTrackingServer(ctx, runID, artifactPath, content, contentType); err != nil {
+			return fmt.Errorf("failed to upload artifact via tracking server: %w", err)
+		}
+
+		return nil
 	}
 
 	err := s.uploadPresigned(ctx, runID, artifactPath, content, contentType, opts.Expiration)
@@ -71,15 +83,7 @@ func (s *Store) Upload(ctx context.Context, runID, artifactURI, artifactPath str
 		return nil
 	}
 
-	if SupportsTrackingServerArtifacts(artifactURI) {
-		if err := s.uploadViaTrackingServer(ctx, runID, artifactPath, content, contentType); err != nil {
-			return fmt.Errorf("failed to upload artifact via tracking server: %w", err)
-		}
-
-		return nil
-	}
-
-	return fmt.Errorf("failed to upload artifact: presigned upload unavailable and artifact URI %q does not support proxy or tracking-server upload", artifactURI)
+	return fmt.Errorf("failed to upload artifact: presigned upload unavailable and artifact URI %q does not support proxy upload", artifactURI)
 }
 
 // DownloadOptions configures artifact download behavior.

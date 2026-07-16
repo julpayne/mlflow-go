@@ -250,7 +250,7 @@ err = client.Tracking().DeleteExperiment(ctx, expID)
 
 ### Artifacts
 
-Upload, list, and download run artifacts via `client.Artifacts()`. `ListArtifacts` uses the standard tracking API (`GET /api/2.0/mlflow/artifacts/list`). For upload and download, the client tries presigned URLs first (for cloud-backed artifact stores), then the mlflow-artifacts proxy when the run uses `mlflow-artifacts:/` URIs, and finally tracking-server upload/download routes for local filesystem artifact roots.
+Upload, list, and download run artifacts via `client.Artifacts()`. `ListArtifacts` uses the standard tracking API (`GET /api/2.0/mlflow/artifacts/list`). For upload and download, local filesystem artifact roots (`file://` or path-only) use tracking-server routes directly; otherwise the client tries presigned URLs first (cloud-backed stores), then the mlflow-artifacts proxy when the run uses `mlflow-artifacts:/` URIs.
 
 ```go
 import (

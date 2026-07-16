@@ -29,7 +29,7 @@ All methods take explicit `runID` — no global active-run state (ADR-0009).
 
 ### 2. Dual transport strategy
 
-Implement presigned-first with proxy fallback in `internal/artifact/store.go`:
+Use tracking-server routes directly for local filesystem artifact roots (`file://` / path-only). Otherwise prefer presigned URLs with proxy fallback in `internal/artifact/store.go`:
 
 | Operation | Primary | Fallback |
 |-----------|---------|----------|
@@ -50,7 +50,7 @@ Excluded (defer): multipart upload, delete, directory upload/download, logged-mo
 ### 5. Server requirements
 
 - **Proxy mode (local dev):** `--serve-artifacts` and `--artifacts-destination`. MLflow assigns `mlflow-artifacts:/` URIs automatically when artifact serving is enabled.
-- **Direct filesystem mode:** `--no-serve-artifacts` with a filesystem `--default-artifact-root` (e.g. `./mlartifacts`); the client falls back to tracking-server upload/download routes.
+- **Direct filesystem mode:** `--no-serve-artifacts` with a filesystem `--default-artifact-root` (e.g. `./mlartifacts`); the client uses tracking-server upload/download routes directly (skips presigned).
 - **Presigned mode (cloud):** MLflow 3.12+ with cloud-backed artifact store and server-side credentials. Requires no client cloud credentials.
 
 ## Alternatives Considered

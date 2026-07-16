@@ -196,18 +196,14 @@ func TestStore_DownloadProxyFallback(t *testing.T) {
 	}
 }
 
-func TestStore_UploadTrackingServerFallback(t *testing.T) {
+func TestStore_UploadTrackingServer(t *testing.T) {
 	var uploaded bool
 
 	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/presigned-upload-url"):
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotImplemented)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error_code": "NOT_IMPLEMENTED",
-				"message":    "Presigned upload is not supported for the current artifact repository.",
-			})
+			t.Errorf("tracking-server upload must not attempt presigned: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "presigned should be skipped", http.StatusInternalServerError)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/upload-artifact"):
 			if r.URL.Query().Get("run_uuid") != "run-1" {
 				t.Errorf("run_uuid = %q, want run-1", r.URL.Query().Get("run_uuid"))
@@ -229,6 +225,33 @@ func TestStore_UploadTrackingServerFallback(t *testing.T) {
 
 	artifactURI := "/tmp/mlruns/1/run-1/artifacts"
 	err := store.Upload(context.Background(), "run-1", artifactURI, "metrics.txt", []byte("tracking-server-bytes"), UploadOptions{})
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if !uploaded {
+		t.Error("expected artifact upload via tracking server")
+	}
+}
+
+func TestStore_UploadTrackingServer_FileURI(t *testing.T) {
+	var uploaded bool
+
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/presigned-upload-url"):
+			t.Errorf("tracking-server upload must not attempt presigned: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "presigned should be skipped", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/upload-artifact"):
+			uploaded = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	artifactURI := "file:///tmp/mlruns/1/run-1/artifacts"
+	err := store.Upload(context.Background(), "run-1", artifactURI, "metrics.txt", []byte("file-uri-bytes"), UploadOptions{})
 	if err != nil {
 		t.Fatalf("Upload() error = %v", err)
 	}
