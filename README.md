@@ -256,6 +256,7 @@ Upload, list, and download run artifacts via `client.Artifacts()`. `ListArtifact
 import (
     "bytes"
     "io"
+    "log"
     "github.com/opendatahub-io/mlflow-go/mlflow/artifacts"
 )
 
@@ -271,10 +272,13 @@ list, err := client.Artifacts().ListArtifacts(ctx, runID, artifacts.WithArtifact
 // Download an artifact file (caller must close the returned reader)
 rc, err := client.Artifacts().DownloadArtifact(ctx, runID, "metrics/output.txt")
 if err != nil {
-    // handle error
+    log.Fatal(err)
 }
 defer rc.Close()
 data, err := io.ReadAll(rc)
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 For local development, start MLflow with artifact serving enabled (`make dev/up` configures this automatically):

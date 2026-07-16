@@ -12,6 +12,11 @@ const (
 	artifactsAPIPrefix         = "/api/2.0/mlflow-artifacts/artifacts"
 	trackingServerUploadPath   = "/ajax-api/2.0/mlflow/upload-artifact"
 	trackingServerDownloadPath = "/get-artifact"
+
+	// MaxTrackingServerUploadSize is the hard limit enforced by MLflow's legacy
+	// upload_artifact_handler (/ajax-api/2.0/mlflow/upload-artifact). Verified
+	// against the pinned PROTO_VERSION (MLflow v3.12.0): 10 * 1024 * 1024.
+	MaxTrackingServerUploadSize = 10 << 20 // 10 MiB
 )
 
 // ResolveStoragePath maps a run artifact URI and relative artifact path to the

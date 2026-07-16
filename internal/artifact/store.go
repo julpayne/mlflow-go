@@ -55,6 +55,9 @@ func (s *Store) Upload(ctx context.Context, runID, artifactURI, artifactPath str
 	// Local filesystem artifact roots use tracking-server routes only; skip
 	// presigned so a 5xx/timeout there cannot block a working upload path.
 	if SupportsTrackingServerArtifacts(artifactURI) {
+		if int64(len(content)) > MaxTrackingServerUploadSize {
+			return fmt.Errorf("artifact content exceeds tracking-server upload size of %d bytes", MaxTrackingServerUploadSize)
+		}
 		if err := s.uploadViaTrackingServer(ctx, runID, artifactPath, content, contentType); err != nil {
 			return fmt.Errorf("failed to upload artifact via tracking server: %w", err)
 		}

@@ -101,6 +101,7 @@ message PromptOptimizationJobTag {
 // Workspace Management Messages
 // =============================================================================
 
+// Workspace metadata returned by workspace APIs.
 message Workspace {
   optional string name = 1;
 }
@@ -131,10 +132,34 @@ class StripUnusedServiceAPIsTest(unittest.TestCase):
         self.assertIn("Evaluation Dataset RPCs", content)
         self.assertIn("Create an evaluation dataset", content)
         self.assertIn("Workspace Management Messages", content)
+        self.assertIn("Workspace metadata returned by workspace APIs", content)
         self.assertIn("message Workspace", content)
 
         for token in MOD.FORBIDDEN:
             self.assertNotIn(token, content)
+
+    def test_remove_messages_preserves_next_message_docs(self) -> None:
+        # No section banner between stripped and retained messages — ordinary
+        # docs belonging to Workspace must survive.
+        sample = """\
+// ========== Prompt Optimization API Messages ==========
+
+message PromptOptimizationJobTag {
+  optional string key = 1;
+}
+
+// Workspace metadata returned by workspace APIs.
+message Workspace {
+  optional string name = 1;
+}
+"""
+        content = MOD.remove_messages(sample)
+        content = MOD.cleanup_orphans(content)
+
+        self.assertNotIn("PromptOptimizationJobTag", content)
+        self.assertNotIn("Prompt Optimization API Messages", content)
+        self.assertIn("Workspace metadata returned by workspace APIs", content)
+        self.assertIn("message Workspace", content)
 
 
 if __name__ == "__main__":

@@ -681,6 +681,37 @@ func TestReadResponseBody_ExceedsLimit(t *testing.T) {
 	}
 }
 
+func TestLimitedReadCloser_CopyStopsAtLimit(t *testing.T) {
+	const limit int64 = 8
+	body := io.NopCloser(strings.NewReader(strings.Repeat("x", int(limit)+4)))
+	rc := newLimitedReadCloser(body, limit)
+
+	var buf strings.Builder
+	n, err := io.Copy(&buf, rc)
+	if err == nil {
+		t.Fatal("expected size error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("error = %v, want exceeds maximum size", err)
+	}
+	if n != limit {
+		t.Fatalf("copied %d bytes, want %d", n, limit)
+	}
+	if int64(buf.Len()) != limit {
+		t.Fatalf("buffer len = %d, want %d", buf.Len(), limit)
+	}
+
+	// Subsequent reads must keep reporting the exceeded error with no extra bytes.
+	extra := make([]byte, 4)
+	n2, err2 := rc.Read(extra)
+	if n2 != 0 {
+		t.Fatalf("subsequent Read returned %d bytes, want 0", n2)
+	}
+	if err2 == nil || !strings.Contains(err2.Error(), "exceeds maximum size") {
+		t.Fatalf("subsequent Read error = %v, want exceeds maximum size", err2)
+	}
+}
+
 func TestRedactAbsoluteURLForLog(t *testing.T) {
 	got := redactAbsoluteURLForLog("https://storage.example.com/object?X-Amz-Signature=secret&X-Amz-Credential=abc")
 	want := "https://storage.example.com/object"

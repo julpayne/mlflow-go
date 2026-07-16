@@ -425,6 +425,13 @@ func (l *limitedReadCloser) Read(p []byte) (int, error) {
 	n, err := l.r.Read(p)
 	l.read += int64(n)
 	if l.read > l.limit {
+		// Exclude the overflow sentinel byte(s) past the configured limit.
+		over := l.read - l.limit
+		n -= int(over)
+		if n < 0 {
+			n = 0
+		}
+		l.read = l.limit
 		l.exceeded = true
 		return n, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
 	}

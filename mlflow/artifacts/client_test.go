@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opendatahub-io/mlflow-go/internal/artifact"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
 )
 
@@ -203,11 +204,49 @@ func (r *byteCountReader) Read(p []byte) (int, error) {
 }
 
 func TestReadArtifactContent_ExceedsMaxSize(t *testing.T) {
-	_, err := readArtifactContent(&byteCountReader{remaining: maxArtifactUploadSize + 1})
+	_, err := readArtifactContent(&byteCountReader{remaining: maxArtifactUploadSize + 1}, maxArtifactUploadSize)
 	if err == nil {
 		t.Fatal("expected error for oversized artifact content")
 	}
 	if !strings.Contains(err.Error(), "maximum upload size") {
 		t.Errorf("error = %v, want maximum upload size message", err)
+	}
+}
+
+func TestClient_LogArtifact_TrackingServerEnforces10MiB(t *testing.T) {
+	var uploaded bool
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/runs/get"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"run": map[string]any{
+					"info": map[string]any{
+						"artifact_uri": "file:///tmp/mlruns/1/run-1/artifacts",
+					},
+				},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/upload-artifact"):
+			uploaded = true
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/presigned-upload-url"):
+			t.Errorf("must not attempt presigned for tracking-server root")
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	oversized := &byteCountReader{remaining: artifact.MaxTrackingServerUploadSize + 1}
+	err := client.LogArtifact(context.Background(), "run-1", "big.bin", oversized)
+	if err == nil {
+		t.Fatal("expected error for content over tracking-server 10 MiB limit")
+	}
+	if !strings.Contains(err.Error(), "maximum upload size") {
+		t.Errorf("error = %v, want maximum upload size message", err)
+	}
+	if uploaded {
+		t.Error("oversized content must not be uploaded")
 	}
 }

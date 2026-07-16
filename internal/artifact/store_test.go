@@ -260,6 +260,22 @@ func TestStore_UploadTrackingServer_FileURI(t *testing.T) {
 	}
 }
 
+func TestStore_UploadTrackingServer_RejectsOversize(t *testing.T) {
+	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("oversized tracking-server upload must not hit the network: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+
+	content := make([]byte, MaxTrackingServerUploadSize+1)
+	err := store.Upload(context.Background(), "run-1", "/tmp/mlruns/1/run-1/artifacts", "big.bin", content, UploadOptions{})
+	if err == nil {
+		t.Fatal("expected error for content over tracking-server upload limit")
+	}
+	if !strings.Contains(err.Error(), "tracking-server upload size") {
+		t.Errorf("error = %v, want tracking-server upload size message", err)
+	}
+}
+
 func TestStore_DownloadTrackingServer(t *testing.T) {
 	store := newTestStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

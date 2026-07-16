@@ -79,6 +79,7 @@ Rejected — artifacts are a distinct MLflow domain; a separate sub-client keeps
 
 - `LogArtifact` reads the entire upload into memory via `io.ReadAll` — large files risk uncontrolled memory allocation (streaming deferred)
 - `DownloadArtifact` returns `io.ReadCloser` for streaming download; uploads still buffer via `io.ReadAll` (see above)
+- Tracking-server legacy upload (`/ajax-api/2.0/mlflow/upload-artifact`) is capped at 10 MiB by MLflow v3.12.0; proxy/presigned paths keep the 100 MiB client buffer limit
 - Presigned upload requires MLflow 3.12+ server; older servers use proxy fallback only
 - List returns one directory level at a time (matches MLflow REST API behavior)
 

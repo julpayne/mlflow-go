@@ -73,12 +73,19 @@ func (c *Client) LogArtifact(ctx context.Context, runID, artifactPath string, r 
 		opt(o)
 	}
 
-	content, err := readArtifactContent(r)
+	artifactURI, err := c.store.ArtifactURI(ctx, runID)
 	if err != nil {
 		return err
 	}
 
-	artifactURI, err := c.store.ArtifactURI(ctx, runID)
+	maxSize := int64(maxArtifactUploadSize)
+	if artifact.SupportsTrackingServerArtifacts(artifactURI) {
+		// Legacy /ajax-api/2.0/mlflow/upload-artifact rejects bodies over 10 MiB
+		// (MLflow v3.12.0 upload_artifact_handler). Cap before buffering.
+		maxSize = artifact.MaxTrackingServerUploadSize
+	}
+
+	content, err := readArtifactContent(r, maxSize)
 	if err != nil {
 		return err
 	}
@@ -123,14 +130,14 @@ func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath strin
 	return rc, nil
 }
 
-func readArtifactContent(r io.Reader) ([]byte, error) {
-	limited := io.LimitReader(r, maxArtifactUploadSize+1)
+func readArtifactContent(r io.Reader, maxSize int64) ([]byte, error) {
+	limited := io.LimitReader(r, maxSize+1)
 	content, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read artifact content: %w", err)
 	}
-	if int64(len(content)) > maxArtifactUploadSize {
-		return nil, fmt.Errorf("artifact content exceeds maximum upload size of %d bytes", maxArtifactUploadSize)
+	if int64(len(content)) > maxSize {
+		return nil, fmt.Errorf("artifact content exceeds maximum upload size of %d bytes", maxSize)
 	}
 	return content, nil
 }

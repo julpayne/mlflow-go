@@ -60,15 +60,41 @@ def remove_rpc_blocks(text: str) -> str:
     return text
 
 
+def _is_section_banner(line: str) -> bool:
+    """Return True for // =====... banner / section-header comment lines."""
+    if not line.startswith("//"):
+        return False
+    body = line[2:].strip()
+    return body.startswith("=") or "====" in body
+
+
 def remove_messages(text: str) -> str:
-    """Remove target messages without consuming following section headers."""
+    """Remove target messages and an immediately preceding banner header only.
+
+    Ordinary // documentation that belongs to the next retained message is
+    preserved by ending each match at the target message's own closing brace.
+    """
     for name in MESSAGE_NAMES:
-        # Also drop a section header immediately above the first stripped message.
+        # Top-level messages close with '}' at column 0; nested message Response
+        # blocks close with indented '  }', so they are not truncated early.
         pattern = re.compile(
-            rf"(?:^//[^\n]*\n)*message {name} \{{.*?(?=\nmessage |\n// =+|\Z)",
-            re.DOTALL | re.MULTILINE,
+            rf"message {name} \{{.*?\n\}}\n?",
+            re.DOTALL,
         )
-        text = pattern.sub("", text)
+        while True:
+            match = pattern.search(text)
+            if not match:
+                break
+            start = match.start()
+            lines = text[:start].splitlines(keepends=True)
+            i = len(lines)
+            while i > 0:
+                stripped = lines[i - 1].strip()
+                if stripped == "" or _is_section_banner(stripped):
+                    i -= 1
+                    continue
+                break
+            text = "".join(lines[:i]) + text[match.end() :]
     return text
 
 
