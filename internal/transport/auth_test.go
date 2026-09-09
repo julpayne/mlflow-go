@@ -100,7 +100,8 @@ func TestTokenFileRoundTripper_Rotation(t *testing.T) {
 		t.Errorf("first request Authorization = %q, want %q", receivedAuth, "Bearer token-v1")
 	}
 
-	if err := os.WriteFile(tokenFile, []byte("token-v2"), 0600); err != nil {
+	err = os.WriteFile(tokenFile, []byte("token-v2"), 0600)
+	if err != nil {
 		t.Fatalf("WriteFile error: %v", err)
 	}
 
