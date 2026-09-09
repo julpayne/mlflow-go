@@ -51,6 +51,12 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 
+	hasAuth := cfg.Token != "" || cfg.TokenPath != ""
+	if cfg.Insecure && hasAuth {
+		return nil, fmt.Errorf("refusing to send credentials over an insecure (TLS-unverified) connection; " +
+			"remove WithInsecure or the token/token-path option")
+	}
+
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		timeout := cfg.Timeout
@@ -75,7 +81,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		baseURL:    baseURL,
 		headers:    cfg.Headers,
-		httpClient: wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath),
+		httpClient: wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL),
 		logger:     cfg.Logger,
 	}, nil
 }
@@ -460,7 +466,7 @@ func redactAbsoluteURLForLog(absoluteURL string) string {
 	return parsed.String()
 }
 
-func wrapClientWithAuth(c *http.Client, token, tokenPath string) *http.Client {
+func wrapClientWithAuth(c *http.Client, token, tokenPath string, trackingURL *url.URL) *http.Client {
 	if token == "" && tokenPath == "" {
 		return c
 	}
@@ -470,9 +476,9 @@ func wrapClientWithAuth(c *http.Client, token, tokenPath string) *http.Client {
 	}
 	var rt http.RoundTripper
 	if tokenPath != "" {
-		rt = NewTokenFileRoundTripper(base, tokenPath)
+		rt = NewTokenFileRoundTripper(base, tokenPath, trackingURL)
 	} else {
-		rt = NewTokenRoundTripper(base, token)
+		rt = NewTokenRoundTripper(base, token, trackingURL)
 	}
 	clone := *c
 	clone.Transport = rt

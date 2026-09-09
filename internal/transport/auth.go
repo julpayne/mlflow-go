@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -18,37 +19,47 @@ func FormatAuthHeader(token string) string {
 	return "Bearer " + token
 }
 
-// tokenRoundTripper injects a static Authorization header on every request.
+// tokenRoundTripper injects a static Authorization header on requests
+// whose origin (scheme + host) matches the configured tracking server.
 type tokenRoundTripper struct {
 	base      http.RoundTripper
+	origin    string // "scheme://host" of the tracking server
 	authValue string
 }
 
-// NewTokenRoundTripper wraps base to inject an Authorization header with the given token.
-func NewTokenRoundTripper(base http.RoundTripper, token string) http.RoundTripper {
+// NewTokenRoundTripper wraps base to inject an Authorization header with the
+// given token only for requests to trackingURL's origin.
+func NewTokenRoundTripper(base http.RoundTripper, token string, trackingURL *url.URL) http.RoundTripper {
 	return &tokenRoundTripper{
 		base:      base,
+		origin:    originFromURL(trackingURL),
 		authValue: FormatAuthHeader(token),
 	}
 }
 
 func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", t.authValue)
+	if requestOrigin(r) == t.origin {
+		r.Header.Set("Authorization", t.authValue)
+	}
 	return t.base.RoundTrip(r)
 }
 
 // tokenFileRoundTripper re-reads a token file on every request to support
-// Kubernetes projected service-account tokens that rotate.
+// Kubernetes projected service-account tokens that rotate. Credentials are
+// only sent to the configured tracking server origin.
 type tokenFileRoundTripper struct {
 	base      http.RoundTripper
+	origin    string // "scheme://host" of the tracking server
 	tokenPath string
 }
 
-// NewTokenFileRoundTripper wraps base to read the token from path on every request.
-func NewTokenFileRoundTripper(base http.RoundTripper, path string) http.RoundTripper {
+// NewTokenFileRoundTripper wraps base to read the token from path on every
+// request, injecting it only for requests to trackingURL's origin.
+func NewTokenFileRoundTripper(base http.RoundTripper, path string, trackingURL *url.URL) http.RoundTripper {
 	return &tokenFileRoundTripper{
 		base:      base,
+		origin:    originFromURL(trackingURL),
 		tokenPath: path,
 	}
 }
@@ -64,6 +75,16 @@ func (t *tokenFileRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	}
 
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", FormatAuthHeader(token))
+	if requestOrigin(r) == t.origin {
+		r.Header.Set("Authorization", FormatAuthHeader(token))
+	}
 	return t.base.RoundTrip(r)
+}
+
+func originFromURL(u *url.URL) string {
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+}
+
+func requestOrigin(r *http.Request) string {
+	return strings.ToLower(r.URL.Scheme) + "://" + strings.ToLower(r.URL.Host)
 }
