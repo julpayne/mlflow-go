@@ -9,14 +9,16 @@ import (
 
 // options holds the configuration for a Client.
 type options struct {
-	trackingURI string
-	headers     map[string]string
-	httpClient  *http.Client
-	logger      *slog.Logger
-	insecure    bool
-	timeout     time.Duration
-	token       string
-	tokenPath   string
+	trackingURI        string
+	headers            map[string]string
+	httpClient         *http.Client
+	logger             *slog.Logger
+	insecure           bool
+	timeout            time.Duration
+	token              string
+	tokenPath          string
+	workspace          string
+	workspacesSupport  bool
 }
 
 // Option configures a Client.
@@ -93,5 +95,26 @@ func WithToken(token string) Option {
 func WithTokenPath(path string) Option {
 	return func(o *options) {
 		o.tokenPath = path
+	}
+}
+
+// WithWorkspace sets the workspace name for multi-tenant isolation.
+// When combined with WithWorkspacesSupport, the X-MLFLOW-WORKSPACE header
+// is only sent if the server reports that workspaces are enabled.
+// Without WithWorkspacesSupport, the header is always sent.
+func WithWorkspace(name string) Option {
+	return func(o *options) {
+		o.workspace = name
+	}
+}
+
+// WithWorkspacesSupport enables server probing to conditionally attach the
+// X-MLFLOW-WORKSPACE header. On the first API call, the client calls
+// GET /api/3.0/mlflow/server-info to check if workspaces are enabled.
+// If disabled, the workspace header is silently omitted to avoid
+// FEATURE_DISABLED errors from MLflow 3.13+.
+func WithWorkspacesSupport() Option {
+	return func(o *options) {
+		o.workspacesSupport = true
 	}
 }
