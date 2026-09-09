@@ -250,3 +250,114 @@ func TestClient_LogArtifact_TrackingServerEnforces10MiB(t *testing.T) {
 		t.Error("oversized content must not be uploaded")
 	}
 }
+
+// --- UploadArtifact (path-based) tests ---
+
+func TestClient_UploadArtifact_Success(t *testing.T) {
+	var receivedPath string
+	var receivedBody string
+	var receivedContentType string
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+			http.NotFound(w, r)
+			return
+		}
+		receivedPath = r.URL.Path
+		receivedContentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "experiments/1/data.json",
+		bytes.NewReader([]byte(`{"key":"value"}`)),
+		WithUploadContentType("application/json"),
+	)
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedPath != "/api/2.0/mlflow-artifacts/artifacts/experiments/1/data.json" {
+		t.Errorf("path = %q", receivedPath)
+	}
+	if receivedBody != `{"key":"value"}` {
+		t.Errorf("body = %q", receivedBody)
+	}
+	if receivedContentType != "application/json" {
+		t.Errorf("content-type = %q, want application/json", receivedContentType)
+	}
+}
+
+func TestClient_UploadArtifact_DefaultContentType(t *testing.T) {
+	var receivedContentType string
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "file.bin", bytes.NewReader([]byte("data")))
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedContentType != "application/octet-stream" {
+		t.Errorf("content-type = %q, want application/octet-stream", receivedContentType)
+	}
+}
+
+func TestClient_UploadArtifact_EmptyPath(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	err := client.UploadArtifact(context.Background(), "", bytes.NewReader([]byte("x")))
+	if err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestClient_UploadArtifact_NilReader(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	err := client.UploadArtifact(context.Background(), "file.txt", nil)
+	if err == nil {
+		t.Error("expected error for nil reader")
+	}
+}
+
+// --- DownloadArtifactByPath tests ---
+
+func TestClient_DownloadArtifactByPath_Success(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+			http.NotFound(w, r)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/api/2.0/mlflow-artifacts/artifacts/") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte("downloaded-content"))
+	}))
+
+	rc, err := client.DownloadArtifactByPath(context.Background(), "experiments/1/data.json")
+	if err != nil {
+		t.Fatalf("DownloadArtifactByPath() error = %v", err)
+	}
+	defer rc.Close()
+
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(body) != "downloaded-content" {
+		t.Errorf("body = %q, want downloaded-content", string(body))
+	}
+}
+
+func TestClient_DownloadArtifactByPath_EmptyPath(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	_, err := client.DownloadArtifactByPath(context.Background(), "")
+	if err == nil {
+		t.Error("expected error for empty path")
+	}
+}
