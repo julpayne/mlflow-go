@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/opendatahub-io/mlflow-go/internal/conv"
+	internalerrors "github.com/opendatahub-io/mlflow-go/internal/errors"
 	"github.com/opendatahub-io/mlflow-go/internal/gen/mlflowpb"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
 )
@@ -240,6 +241,41 @@ func (c *Client) SetExperimentTag(ctx context.Context, experimentID, key, value 
 	}
 
 	return nil
+}
+
+// GetOrCreateExperiment retrieves an experiment by name, creating it if it
+// does not exist. Concurrent callers creating the same experiment are handled
+// via RESOURCE_ALREADY_EXISTS retry. Returns an error if the experiment exists
+// but has been deleted (lifecycle_stage != "active").
+func (c *Client) GetOrCreateExperiment(ctx context.Context, name string, opts ...CreateExperimentOption) (*Experiment, error) {
+	if name == "" {
+		return nil, fmt.Errorf("mlflow: experiment name is required")
+	}
+
+	exp, err := c.GetExperimentByName(ctx, name)
+	if err == nil {
+		if exp.LifecycleStage != "active" {
+			return nil, fmt.Errorf("mlflow: experiment %q exists but is %s", name, exp.LifecycleStage)
+		}
+		return exp, nil
+	}
+	if !internalerrors.IsNotFound(err) {
+		return nil, err
+	}
+
+	_, createErr := c.CreateExperiment(ctx, name, opts...)
+	if createErr != nil && !internalerrors.IsAlreadyExists(createErr) {
+		return nil, createErr
+	}
+
+	exp, err = c.GetExperimentByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if exp.LifecycleStage != "active" {
+		return nil, fmt.Errorf("mlflow: experiment %q exists but is %s", name, exp.LifecycleStage)
+	}
+	return exp, nil
 }
 
 // --- Run operations ---
