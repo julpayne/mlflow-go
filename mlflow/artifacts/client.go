@@ -130,6 +130,56 @@ func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath strin
 	return rc, nil
 }
 
+// UploadArtifact uploads an artifact to the mlflow-artifacts proxy using an
+// absolute storage path (no run ID required).
+// Uses PUT /api/2.0/mlflow-artifacts/artifacts/{artifactPath}.
+func (c *Client) UploadArtifact(ctx context.Context, artifactPath string, r io.Reader, opts ...UploadArtifactOption) error {
+	if artifactPath == "" {
+		return fmt.Errorf("mlflow: artifact path is required")
+	}
+	if r == nil {
+		return fmt.Errorf("mlflow: artifact reader is required")
+	}
+
+	o := &uploadArtifactOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	content, err := readArtifactContent(r, maxArtifactUploadSize)
+	if err != nil {
+		return err
+	}
+
+	contentType := o.contentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	path := "/api/2.0/mlflow-artifacts/artifacts/" + artifactPath
+	if err := c.transport.PutBytes(ctx, path, content, contentType); err != nil {
+		return fmt.Errorf("failed to upload artifact: %w", err)
+	}
+	return nil
+}
+
+// DownloadArtifactByPath downloads an artifact from the mlflow-artifacts proxy
+// using an absolute storage path (no run ID required).
+// Uses GET /api/2.0/mlflow-artifacts/artifacts/{artifactPath}.
+// The caller must close the returned ReadCloser.
+func (c *Client) DownloadArtifactByPath(ctx context.Context, artifactPath string) (io.ReadCloser, error) {
+	if artifactPath == "" {
+		return nil, fmt.Errorf("mlflow: artifact path is required")
+	}
+
+	path := "/api/2.0/mlflow-artifacts/artifacts/" + artifactPath
+	rc, err := c.transport.GetBody(ctx, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download artifact: %w", err)
+	}
+	return rc, nil
+}
+
 func readArtifactContent(r io.Reader, maxSize int64) ([]byte, error) {
 	limited := io.LimitReader(r, maxSize+1)
 	content, err := io.ReadAll(limited)
