@@ -88,14 +88,16 @@ func NewClient(clientOpts ...Option) (*Client, error) {
 
 	// Create transport client
 	transportCfg := transport.Config{
-		BaseURL:    opts.trackingURI,
-		Headers:    opts.headers,
-		HTTPClient: opts.httpClient,
-		Logger:     opts.logger,
-		Timeout:    opts.timeout,
-		Insecure:   opts.insecure,
-		Token:      opts.token,
-		TokenPath:  opts.tokenPath,
+		BaseURL:           opts.trackingURI,
+		Headers:           opts.headers,
+		HTTPClient:        opts.httpClient,
+		Logger:            opts.logger,
+		Timeout:           opts.timeout,
+		Insecure:          opts.insecure,
+		Token:             opts.token,
+		TokenPath:         opts.tokenPath,
+		Workspace:         opts.workspace,
+		WorkspacesSupport: opts.workspacesSupport,
 	}
 
 	transportClient, err := transport.New(transportCfg)
