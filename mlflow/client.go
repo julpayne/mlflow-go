@@ -14,6 +14,7 @@ import (
 	"github.com/opendatahub-io/mlflow-go/mlflow/mcpregistry"
 	"github.com/opendatahub-io/mlflow-go/mlflow/promptregistry"
 	"github.com/opendatahub-io/mlflow-go/mlflow/tracking"
+	"github.com/opendatahub-io/mlflow-go/mlflow/workspace"
 )
 
 // Client is the MLflow SDK client.
@@ -33,6 +34,9 @@ type Client struct {
 
 	mcpRegistryOnce sync.Once
 	mcpRegistry     *mcpregistry.Client
+
+	workspaceOnce sync.Once
+	workspace     *workspace.Client
 }
 
 // NewClient creates a new MLflow client with the given options.
@@ -149,4 +153,13 @@ func (c *Client) MCPRegistry() *mcpregistry.Client {
 		c.mcpRegistry = mcpregistry.NewClient(c.transport)
 	})
 	return c.mcpRegistry
+}
+
+// Workspaces returns the Workspace client for workspace management.
+// The sub-client is created lazily on first access.
+func (c *Client) Workspaces() *workspace.Client {
+	c.workspaceOnce.Do(func() {
+		c.workspace = workspace.NewClient(c.transport)
+	})
+	return c.workspace
 }

@@ -305,3 +305,19 @@ func TestNewClient_ExplicitTokenOverridesEnv(t *testing.T) {
 		t.Fatalf("NewClient(explicit token) error = %v", err)
 	}
 }
+
+func TestClient_Workspaces_ReturnsSameInstance(t *testing.T) {
+	client, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	w1 := client.Workspaces()
+	w2 := client.Workspaces()
+
+	if w1 != w2 {
+		t.Error("Workspaces() should return same instance")
+	}
+}
