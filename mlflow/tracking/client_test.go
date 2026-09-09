@@ -537,6 +537,128 @@ func TestSetExperimentTag_EmptyKey(t *testing.T) {
 	}
 }
 
+// --- GetOrCreateExperiment tests ---
+
+func TestGetOrCreateExperiment_ExistingActive(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mustEncodeJSON(t, w, map[string]any{
+			"experiment": map[string]any{
+				"experiment_id":   "42",
+				"name":            "my-exp",
+				"lifecycle_stage": "active",
+			},
+		})
+	}))
+
+	exp, err := client.GetOrCreateExperiment(context.Background(), "my-exp")
+	if err != nil {
+		t.Fatalf("GetOrCreateExperiment() error = %v", err)
+	}
+	if exp.ID != "42" {
+		t.Errorf("ID = %q, want %q", exp.ID, "42")
+	}
+}
+
+func TestGetOrCreateExperiment_NotFoundThenCreate(t *testing.T) {
+	calls := 0
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		calls++
+		switch {
+		case r.URL.Path == "/api/2.0/mlflow/experiments/get-by-name" && calls == 1:
+			w.WriteHeader(http.StatusNotFound)
+			mustEncodeJSON(t, w, map[string]string{"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "not found"})
+		case r.URL.Path == "/api/2.0/mlflow/experiments/create":
+			mustEncodeJSON(t, w, map[string]any{"experiment_id": "99"})
+		case r.URL.Path == "/api/2.0/mlflow/experiments/get-by-name" && calls == 3:
+			mustEncodeJSON(t, w, map[string]any{
+				"experiment": map[string]any{
+					"experiment_id":   "99",
+					"name":            "new-exp",
+					"lifecycle_stage": "active",
+				},
+			})
+		default:
+			t.Errorf("unexpected call #%d: %s %s", calls, r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	exp, err := client.GetOrCreateExperiment(context.Background(), "new-exp")
+	if err != nil {
+		t.Fatalf("GetOrCreateExperiment() error = %v", err)
+	}
+	if exp.ID != "99" {
+		t.Errorf("ID = %q, want %q", exp.ID, "99")
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 server calls, got %d", calls)
+	}
+}
+
+func TestGetOrCreateExperiment_RaceAlreadyExists(t *testing.T) {
+	calls := 0
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		calls++
+		switch {
+		case r.URL.Path == "/api/2.0/mlflow/experiments/get-by-name" && calls == 1:
+			w.WriteHeader(http.StatusNotFound)
+			mustEncodeJSON(t, w, map[string]string{"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "not found"})
+		case r.URL.Path == "/api/2.0/mlflow/experiments/create":
+			w.WriteHeader(http.StatusConflict)
+			mustEncodeJSON(t, w, map[string]string{"error_code": "RESOURCE_ALREADY_EXISTS", "message": "race"})
+		case r.URL.Path == "/api/2.0/mlflow/experiments/get-by-name" && calls == 3:
+			mustEncodeJSON(t, w, map[string]any{
+				"experiment": map[string]any{
+					"experiment_id":   "77",
+					"name":            "raced-exp",
+					"lifecycle_stage": "active",
+				},
+			})
+		default:
+			t.Errorf("unexpected call #%d: %s %s", calls, r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+
+	exp, err := client.GetOrCreateExperiment(context.Background(), "raced-exp")
+	if err != nil {
+		t.Fatalf("GetOrCreateExperiment() error = %v", err)
+	}
+	if exp.ID != "77" {
+		t.Errorf("ID = %q, want %q", exp.ID, "77")
+	}
+}
+
+func TestGetOrCreateExperiment_DeletedExperiment(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mustEncodeJSON(t, w, map[string]any{
+			"experiment": map[string]any{
+				"experiment_id":   "10",
+				"name":            "deleted-exp",
+				"lifecycle_stage": "deleted",
+			},
+		})
+	}))
+
+	_, err := client.GetOrCreateExperiment(context.Background(), "deleted-exp")
+	if err == nil {
+		t.Error("expected error for deleted experiment")
+	}
+}
+
+func TestGetOrCreateExperiment_EmptyName(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	_, err := client.GetOrCreateExperiment(context.Background(), "")
+	if err == nil {
+		t.Error("expected error for empty name")
+	}
+}
+
 // --- CreateRun tests ---
 
 func TestCreateRun_Success(t *testing.T) {

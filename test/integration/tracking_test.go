@@ -627,3 +627,41 @@ func TestGetVersion(t *testing.T) {
 
 	t.Logf("MLflow server version: %s", version)
 }
+
+// TestGetOrCreateExperiment tests idempotent experiment creation.
+func TestGetOrCreateExperiment(t *testing.T) {
+	client, err := mlflow.NewClient(mlflow.WithInsecure())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	expName := fmt.Sprintf("e2e-get-or-create-%d", time.Now().UnixNano())
+
+	// First call should create the experiment
+	exp1, err := client.Tracking().GetOrCreateExperiment(ctx, expName)
+	if err != nil {
+		t.Fatalf("GetOrCreateExperiment() first call error = %v", err)
+	}
+	t.Cleanup(func() { _ = client.Tracking().DeleteExperiment(ctx, exp1.ID) })
+
+	if exp1.ID == "" {
+		t.Fatal("Expected non-empty experiment ID")
+	}
+	if exp1.Name != expName {
+		t.Errorf("Name = %q, want %q", exp1.Name, expName)
+	}
+	t.Logf("Created experiment %s with ID %s", expName, exp1.ID)
+
+	// Second call should return the same experiment
+	exp2, err := client.Tracking().GetOrCreateExperiment(ctx, expName)
+	if err != nil {
+		t.Fatalf("GetOrCreateExperiment() second call error = %v", err)
+	}
+
+	if exp2.ID != exp1.ID {
+		t.Errorf("second call ID = %q, want %q", exp2.ID, exp1.ID)
+	}
+}
