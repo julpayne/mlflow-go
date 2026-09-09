@@ -605,3 +605,25 @@ func TestSearchRunsPagination(t *testing.T) {
 
 	t.Log("SearchRunsPagination test passed")
 }
+
+// TestGetVersion tests that the server returns a valid version string.
+func TestGetVersion(t *testing.T) {
+	client, err := mlflow.NewClient(mlflow.WithInsecure())
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	version, err := client.Tracking().GetVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetVersion() error = %v", err)
+	}
+
+	if version == "" {
+		t.Fatal("Expected non-empty version string")
+	}
+
+	t.Logf("MLflow server version: %s", version)
+}
