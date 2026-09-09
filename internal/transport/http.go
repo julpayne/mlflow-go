@@ -28,14 +28,16 @@ type Client struct {
 
 // Config holds configuration for creating a transport Client.
 type Config struct {
-	BaseURL    string
-	Headers    map[string]string
-	HTTPClient *http.Client
-	Logger     *slog.Logger
-	Timeout    time.Duration
-	Insecure   bool
-	Token      string
-	TokenPath  string
+	BaseURL           string
+	Headers           map[string]string
+	HTTPClient        *http.Client
+	Logger            *slog.Logger
+	Timeout           time.Duration
+	Insecure          bool
+	Token             string
+	TokenPath         string
+	Workspace         string
+	WorkspacesSupport bool
 }
 
 // errorResponse represents the MLflow API error format.
@@ -81,7 +83,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		baseURL:    baseURL,
 		headers:    cfg.Headers,
-		httpClient: wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL),
+		httpClient: wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport),
 		logger:     cfg.Logger,
 	}, nil
 }
@@ -483,6 +485,10 @@ func wrapClientWithAuth(c *http.Client, token, tokenPath string, trackingURL *ur
 	clone := *c
 	clone.Transport = rt
 	return &clone
+}
+
+func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool) *http.Client {
+	return WrapClientWithWorkspace(c, workspace, baseURL, probeEnabled)
 }
 
 func (c *Client) parseError(statusCode int, body []byte) error {
