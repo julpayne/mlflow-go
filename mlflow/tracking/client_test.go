@@ -38,6 +38,57 @@ func mustEncodeJSON(t *testing.T, w http.ResponseWriter, v any) {
 	}
 }
 
+// --- GetVersion tests ---
+
+func TestGetVersion_Success(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/version" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("3.14.0\n"))
+	}))
+
+	version, err := client.GetVersion(context.Background())
+	if err != nil {
+		t.Fatalf("GetVersion() error = %v", err)
+	}
+
+	if version != "3.14.0" {
+		t.Errorf("version = %q, want %q", version, "3.14.0")
+	}
+}
+
+func TestGetVersion_ServerError(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error_code":"INTERNAL_ERROR","message":"server down"}`))
+	}))
+
+	_, err := client.GetVersion(context.Background())
+	if err == nil {
+		t.Error("expected error for server error response")
+	}
+}
+
+func TestGetVersion_EmptyResponse(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("  \n"))
+	}))
+
+	_, err := client.GetVersion(context.Background())
+	if err == nil {
+		t.Error("expected error for whitespace-only version response")
+	}
+}
+
 // --- CreateExperiment tests ---
 
 func TestCreateExperiment_Success(t *testing.T) {

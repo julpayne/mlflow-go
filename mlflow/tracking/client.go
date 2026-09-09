@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/opendatahub-io/mlflow-go/internal/conv"
@@ -26,6 +27,23 @@ type Client struct {
 // This is typically called internally by the root mlflow.Client.
 func NewClient(t *transport.Client) *Client {
 	return &Client{transport: t}
+}
+
+// --- Server operations ---
+
+// GetVersion returns the MLflow server version string (e.g. "3.14.0").
+func (c *Client) GetVersion(ctx context.Context) (string, error) {
+	body, _, err := c.transport.GetBytes(ctx, "/version", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get version: %w", err)
+	}
+
+	version := strings.TrimSpace(string(body))
+	if version == "" {
+		return "", fmt.Errorf("mlflow: server returned empty version")
+	}
+
+	return version, nil
 }
 
 // --- Experiment operations ---
