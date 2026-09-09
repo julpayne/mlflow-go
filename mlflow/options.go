@@ -15,6 +15,8 @@ type options struct {
 	logger      *slog.Logger
 	insecure    bool
 	timeout     time.Duration
+	token       string
+	tokenPath   string
 }
 
 // Option configures a Client.
@@ -72,5 +74,24 @@ func WithInsecure() Option {
 func WithTimeout(d time.Duration) Option {
 	return func(o *options) {
 		o.timeout = d
+	}
+}
+
+// WithToken sets a static bearer token for authentication.
+// Overrides MLFLOW_TRACKING_TOKEN environment variable.
+// If the token contains a colon (user:pass), Basic auth is used;
+// otherwise the token is sent as a Bearer token.
+func WithToken(token string) Option {
+	return func(o *options) {
+		o.token = token
+	}
+}
+
+// WithTokenPath sets a path to a file containing the auth token.
+// The file is re-read on every request to support Kubernetes projected
+// service-account tokens that rotate without process restart.
+func WithTokenPath(path string) Option {
+	return func(o *options) {
+		o.tokenPath = path
 	}
 }

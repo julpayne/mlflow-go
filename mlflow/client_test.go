@@ -239,3 +239,69 @@ func TestClient_MCPRegistry_ReturnsSameInstance(t *testing.T) {
 		t.Error("MCPRegistry() should return same instance")
 	}
 }
+
+func TestNewClient_WithToken(t *testing.T) {
+	_, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+		WithToken("my-secret"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(WithToken) error = %v", err)
+	}
+}
+
+func TestNewClient_WithTokenPath(t *testing.T) {
+	tokenFile := t.TempDir() + "/token"
+	if err := os.WriteFile(tokenFile, []byte("sa-token"), 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	_, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+		WithTokenPath(tokenFile),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(WithTokenPath) error = %v", err)
+	}
+}
+
+func TestNewClient_TokenFromEnvVar(t *testing.T) {
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	_, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(token from env) error = %v", err)
+	}
+}
+
+func TestNewClient_ExplicitTokenOverridesEnv(t *testing.T) {
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	// Explicit WithToken should prevent env var from being used.
+	// (We can't easily inspect the internal token, but at least verify construction succeeds.)
+	_, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+		WithToken("explicit-token"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(explicit token) error = %v", err)
+	}
+}

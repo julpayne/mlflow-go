@@ -34,6 +34,8 @@ type Config struct {
 	Logger     *slog.Logger
 	Timeout    time.Duration
 	Insecure   bool
+	Token      string
+	TokenPath  string
 }
 
 // errorResponse represents the MLflow API error format.
@@ -73,7 +75,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		baseURL:    baseURL,
 		headers:    cfg.Headers,
-		httpClient: httpClient,
+		httpClient: wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath),
 		logger:     cfg.Logger,
 	}, nil
 }
@@ -456,6 +458,25 @@ func redactAbsoluteURLForLog(absoluteURL string) string {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String()
+}
+
+func wrapClientWithAuth(c *http.Client, token, tokenPath string) *http.Client {
+	if token == "" && tokenPath == "" {
+		return c
+	}
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	var rt http.RoundTripper
+	if tokenPath != "" {
+		rt = NewTokenFileRoundTripper(base, tokenPath)
+	} else {
+		rt = NewTokenRoundTripper(base, token)
+	}
+	clone := *c
+	clone.Transport = rt
+	return &clone
 }
 
 func (c *Client) parseError(statusCode int, body []byte) error {
