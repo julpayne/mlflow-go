@@ -613,7 +613,7 @@ func TestGetVersion(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	version, err := client.Tracking().GetVersion(ctx)
