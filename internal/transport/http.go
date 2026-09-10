@@ -53,8 +53,8 @@ func New(cfg Config) (*Client, error) {
 
 	hasAuth := cfg.Token != "" || cfg.TokenPath != ""
 	if cfg.Insecure && hasAuth {
-		return nil, fmt.Errorf("refusing to send credentials over an insecure (TLS-unverified) connection; " +
-			"remove WithInsecure or the token/token-path option")
+		return nil, fmt.Errorf("refusing to send credentials over an insecure connection " +
+			"(plain HTTP or TLS verification disabled); remove WithInsecure or the token/token-path option")
 	}
 
 	httpClient := cfg.HTTPClient

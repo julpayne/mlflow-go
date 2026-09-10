@@ -1,7 +1,11 @@
 package mlflow
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -351,5 +355,151 @@ func TestNewClient_EmptyTokenPathSuppressesEnv(t *testing.T) {
 	}
 	if client.opts.token != "" {
 		t.Errorf("opts.token = %q, want empty (env should be suppressed by explicit empty WithTokenPath)", client.opts.token)
+	}
+}
+
+// versionHandler returns a handler that records the Authorization header
+// and responds with a valid /version body.
+func versionHandler(t *testing.T, gotAuth *string) http.Handler {
+	t.Helper()
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("2.18.0"))
+	})
+}
+
+func TestClient_TokenEnvSentOnRequest(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(versionHandler(t, &gotAuth))
+	defer srv.Close()
+
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	client, err := NewClient(
+		WithTrackingURI(srv.URL),
+		WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+		t.Fatalf("GetVersion error: %v", err)
+	}
+	if gotAuth != "Bearer env-token" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer env-token")
+	}
+}
+
+func TestClient_ExplicitTokenOverridesEnvOnRequest(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(versionHandler(t, &gotAuth))
+	defer srv.Close()
+
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	client, err := NewClient(
+		WithTrackingURI(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithToken("explicit-token"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+		t.Fatalf("GetVersion error: %v", err)
+	}
+	if gotAuth != "Bearer explicit-token" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer explicit-token")
+	}
+}
+
+func TestClient_TokenPathSentOnRequest(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(versionHandler(t, &gotAuth))
+	defer srv.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("file-token-v1"), 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	client, err := NewClient(
+		WithTrackingURI(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithTokenPath(tokenFile),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+		t.Fatalf("GetVersion error: %v", err)
+	}
+	if gotAuth != "Bearer file-token-v1" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer file-token-v1")
+	}
+
+	// Rotate the token and verify the next request picks it up.
+	if err := os.WriteFile(tokenFile, []byte("file-token-v2"), 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+		t.Fatalf("GetVersion (rotated) error: %v", err)
+	}
+	if gotAuth != "Bearer file-token-v2" {
+		t.Errorf("Authorization after rotation = %q, want %q", gotAuth, "Bearer file-token-v2")
+	}
+}
+
+func TestClient_EmptyTokenSuppressesEnvOnRequest(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(versionHandler(t, &gotAuth))
+	defer srv.Close()
+
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	client, err := NewClient(
+		WithTrackingURI(srv.URL),
+		WithInsecure(),
+		WithToken(""),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+		t.Fatalf("GetVersion error: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty (env should be suppressed)", gotAuth)
 	}
 }

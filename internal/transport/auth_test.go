@@ -19,8 +19,9 @@ func TestFormatAuthHeader_BearerToken(t *testing.T) {
 
 func TestFormatAuthHeader_BasicAuth(t *testing.T) {
 	got := FormatAuthHeader("user:pass")
-	if got[:6] != "Basic " {
-		t.Errorf("FormatAuthHeader() = %q, want Basic prefix", got)
+	want := "Basic dXNlcjpwYXNz"
+	if got != want {
+		t.Errorf("FormatAuthHeader() = %q, want %q", got, want)
 	}
 }
 
@@ -216,5 +217,64 @@ func TestTokenFileRoundTripper_NoAuthOnRedirectToForeignHost(t *testing.T) {
 
 	if foreignAuth != "" {
 		t.Errorf("foreign host received Authorization = %q, want empty", foreignAuth)
+	}
+}
+
+func TestTokenRoundTripper_NilHeaderRequest(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	serverURL := mustParseURL(t, server.URL)
+	rt := NewTokenRoundTripper(http.DefaultTransport, "nil-hdr-token", serverURL)
+
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustParseURL(t, server.URL+"/test"),
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip error: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "Bearer nil-hdr-token" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer nil-hdr-token")
+	}
+}
+
+func TestTokenFileRoundTripper_NilHeaderRequest(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("nil-hdr-file-token"), 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	serverURL := mustParseURL(t, server.URL)
+	rt := NewTokenFileRoundTripper(http.DefaultTransport, tokenFile, serverURL)
+
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustParseURL(t, server.URL+"/test"),
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip error: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "Bearer nil-hdr-file-token" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer nil-hdr-file-token")
 	}
 }
