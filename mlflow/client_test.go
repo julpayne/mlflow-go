@@ -296,12 +296,60 @@ func TestNewClient_ExplicitTokenOverridesEnv(t *testing.T) {
 	}()
 
 	// Explicit WithToken should prevent env var from being used.
-	// (We can't easily inspect the internal token, but at least verify construction succeeds.)
-	_, err := NewClient(
+	client, err := NewClient(
 		WithTrackingURI("https://mlflow.example.com"),
 		WithToken("explicit-token"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient(explicit token) error = %v", err)
+	}
+	if client.opts.token != "explicit-token" {
+		t.Errorf("opts.token = %q, want %q", client.opts.token, "explicit-token")
+	}
+}
+
+func TestNewClient_EmptyTokenSuppressesEnv(t *testing.T) {
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	client, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+		WithToken(""),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(WithToken empty) error = %v", err)
+	}
+	if client.opts.token != "" {
+		t.Errorf("opts.token = %q, want empty (env should be suppressed by explicit empty WithToken)", client.opts.token)
+	}
+}
+
+func TestNewClient_EmptyTokenPathSuppressesEnv(t *testing.T) {
+	saved := os.Getenv("MLFLOW_TRACKING_TOKEN")
+	os.Setenv("MLFLOW_TRACKING_TOKEN", "env-token")
+	defer func() {
+		if saved != "" {
+			os.Setenv("MLFLOW_TRACKING_TOKEN", saved)
+		} else {
+			os.Unsetenv("MLFLOW_TRACKING_TOKEN")
+		}
+	}()
+
+	client, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+		WithTokenPath(""),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(WithTokenPath empty) error = %v", err)
+	}
+	if client.opts.token != "" {
+		t.Errorf("opts.token = %q, want empty (env should be suppressed by explicit empty WithTokenPath)", client.opts.token)
 	}
 }

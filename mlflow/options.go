@@ -9,14 +9,16 @@ import (
 
 // options holds the configuration for a Client.
 type options struct {
-	trackingURI string
-	headers     map[string]string
-	httpClient  *http.Client
-	logger      *slog.Logger
-	insecure    bool
-	timeout     time.Duration
-	token       string
-	tokenPath   string
+	trackingURI  string
+	headers      map[string]string
+	httpClient   *http.Client
+	logger       *slog.Logger
+	insecure     bool
+	timeout      time.Duration
+	token        string
+	tokenPath    string
+	tokenSet     bool // true when WithToken was called (even with "")
+	tokenPathSet bool // true when WithTokenPath was called (even with "")
 }
 
 // Option configures a Client.
@@ -81,17 +83,23 @@ func WithTimeout(d time.Duration) Option {
 // Overrides MLFLOW_TRACKING_TOKEN environment variable.
 // If the token contains a colon (user:pass), Basic auth is used;
 // otherwise the token is sent as a Bearer token.
+// Passing an empty string explicitly disables token auth,
+// even when MLFLOW_TRACKING_TOKEN is set.
 func WithToken(token string) Option {
 	return func(o *options) {
 		o.token = token
+		o.tokenSet = true
 	}
 }
 
 // WithTokenPath sets a path to a file containing the auth token.
 // The file is re-read on every request to support Kubernetes projected
 // service-account tokens that rotate without process restart.
+// Passing an empty string explicitly disables token-file auth,
+// even when MLFLOW_TRACKING_TOKEN is set.
 func WithTokenPath(path string) Option {
 	return func(o *options) {
 		o.tokenPath = path
+		o.tokenPathSet = true
 	}
 }
