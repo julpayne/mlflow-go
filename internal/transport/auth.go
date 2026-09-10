@@ -65,6 +65,10 @@ func NewTokenFileRoundTripper(base http.RoundTripper, path string, trackingURL *
 }
 
 func (t *tokenFileRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if requestOrigin(req) != t.origin {
+		return t.base.RoundTrip(req)
+	}
+
 	data, err := os.ReadFile(t.tokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("mlflow: failed to read token file %q: %w", t.tokenPath, err)
@@ -75,9 +79,7 @@ func (t *tokenFileRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	}
 
 	r := req.Clone(req.Context())
-	if requestOrigin(r) == t.origin {
-		r.Header.Set("Authorization", FormatAuthHeader(token))
-	}
+	r.Header.Set("Authorization", FormatAuthHeader(token))
 	return t.base.RoundTrip(r)
 }
 
