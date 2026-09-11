@@ -51,7 +51,7 @@ func NewClient(clientOpts ...Option) (*Client, error) {
 	if opts.trackingURI == "" {
 		opts.trackingURI = os.Getenv("MLFLOW_TRACKING_URI")
 	}
-	if opts.token == "" && opts.tokenPath == "" && !opts.tokenSet && !opts.tokenPathSet {
+	if opts.token == "" && opts.tokenPath == "" && !opts.tokenSet && !opts.tokenPathSet && opts.headers["Authorization"] == "" {
 		opts.token = os.Getenv("MLFLOW_TRACKING_TOKEN")
 	}
 	if !opts.insecure {

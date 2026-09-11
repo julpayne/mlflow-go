@@ -503,3 +503,31 @@ func TestClient_EmptyTokenSuppressesEnvOnRequest(t *testing.T) {
 		t.Errorf("Authorization = %q, want empty (env should be suppressed)", gotAuth)
 	}
 }
+
+func TestClient_ExplicitAuthHeaderNotClobberedByEnvToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("2.18.0"))
+	}))
+	defer srv.Close()
+
+	t.Setenv("MLFLOW_TRACKING_TOKEN", "AMBIENT-SA-TOKEN")
+
+	client, err := NewClient(
+		WithTrackingURI(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithHeaders(map[string]string{"Authorization": "Bearer APP-SCOPED-TOKEN"}),
+	)
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+		t.Fatalf("GetVersion error: %v", err)
+	}
+	if gotAuth != "Bearer APP-SCOPED-TOKEN" {
+		t.Errorf("Authorization = %q, want %q (explicit header clobbered by ambient env token)", gotAuth, "Bearer APP-SCOPED-TOKEN")
+	}
+}
