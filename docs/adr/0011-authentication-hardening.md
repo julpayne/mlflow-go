@@ -44,11 +44,11 @@ client, err := mlflow.NewClient(
 
 ### 4. Origin-scoped credential injection
 
-Both token round trippers (`tokenRoundTripper` and `tokenFileRoundTripper`) store the tracking server's origin (`scheme://host`) at construction time. The `Authorization` header is only set when the request URL's origin matches. Requests to any other host -- including redirects to pre-signed artifact URLs -- carry no credentials.
+Both token round trippers (`tokenRoundTripper` and `tokenFileRoundTripper`) store the tracking server's origin (`scheme://host`) at construction time. The `Authorization` header is only set when the request URL's origin matches. The configured token is not injected for requests to any other host, including redirects to pre-signed artifact URLs.
 
 ### 5. Insecure + token rejection
 
-`transport.New()` returns an error when `Insecure` is true and either `Token` or `TokenPath` is set. This prevents sending credentials over plain HTTP or TLS-unverified connections. Users who genuinely need both must inject a pre-configured `http.Client` via `WithHTTPClient`, accepting full responsibility for transport security.
+`transport.New()` returns an error when `Insecure` is true and either `Token` or `TokenPath` is set. This prevents sending credentials over plain HTTP or TLS-unverified connections. Users who need custom TLS behaviour (e.g. a private CA) should use an HTTPS URI, omit `WithInsecure`, and configure the TLS settings through `WithHTTPClient`.
 
 ## Alternatives Considered
 
@@ -91,7 +91,7 @@ Use `*string` for `token` and `tokenPath` in the options struct so `nil` means "
 
 ### Negative
 
-- Users who previously relied on `WithInsecure` + `WithToken` for local development against plain HTTP must now use `WithHTTPClient` or remove `WithInsecure` and switch to HTTPS
+- Users who previously relied on `WithInsecure` + `WithToken` for local development against plain HTTP must now remove `WithInsecure` and switch to HTTPS
 - The round tripper wrapping adds one origin comparison per request (negligible cost, but adds code)
 
 ### Neutral
