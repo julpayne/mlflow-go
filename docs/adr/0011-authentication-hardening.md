@@ -44,7 +44,7 @@ client, err := mlflow.NewClient(
 
 ### 4. Origin-scoped credential injection
 
-Both token round trippers (`tokenRoundTripper` and `tokenFileRoundTripper`) store the tracking server's origin (`scheme://host`) at construction time. The `Authorization` header is only set when the request URL's origin matches. The configured token is not injected for requests to any other host, including redirects to pre-signed artifact URLs.
+Both token round trippers (`tokenRoundTripper` and `tokenFileRoundTripper`) store the tracking server's origin (`scheme://host`) at construction time. The `Authorization` header is only set when the request URL's origin matches. For requests to any other host -- including redirects to subdomains or scheme-downgraded URLs -- any pre-existing `Authorization` header is actively stripped before forwarding.
 
 ### 5. Insecure + token rejection
 

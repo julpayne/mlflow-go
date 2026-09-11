@@ -278,3 +278,58 @@ func TestTokenFileRoundTripper_NilHeaderRequest(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer nil-hdr-file-token")
 	}
 }
+
+func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
+	var gotAuth string
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer foreign.Close()
+
+	trackingOrigin := mustParseURL(t, "https://tracking.example.com")
+	rt := NewTokenRoundTripper(http.DefaultTransport, "secret", trackingOrigin)
+
+	req, _ := http.NewRequest(http.MethodGet, foreign.URL+"/callback", nil)
+	req.Header.Set("Authorization", "Bearer stale-token")
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip error: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("foreign host received Authorization = %q, want empty", gotAuth)
+	}
+}
+
+func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	var gotAuth string
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer foreign.Close()
+
+	trackingOrigin := mustParseURL(t, "https://tracking.example.com")
+	rt := NewTokenFileRoundTripper(http.DefaultTransport, tokenFile, trackingOrigin)
+
+	req, _ := http.NewRequest(http.MethodGet, foreign.URL+"/callback", nil)
+	req.Header.Set("Authorization", "Bearer stale-token")
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip error: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("foreign host received Authorization = %q, want empty", gotAuth)
+	}
+}

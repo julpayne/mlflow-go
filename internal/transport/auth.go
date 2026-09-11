@@ -44,6 +44,8 @@ func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			r.Header = make(http.Header)
 		}
 		r.Header.Set("Authorization", t.authValue)
+	} else {
+		r.Header.Del("Authorization")
 	}
 	return t.base.RoundTrip(r)
 }
@@ -69,7 +71,9 @@ func NewTokenFileRoundTripper(base http.RoundTripper, path string, trackingURL *
 
 func (t *tokenFileRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if requestOrigin(req) != t.origin {
-		return t.base.RoundTrip(req)
+		r := req.Clone(req.Context())
+		r.Header.Del("Authorization")
+		return t.base.RoundTrip(r)
 	}
 
 	data, err := os.ReadFile(t.tokenPath)
