@@ -51,6 +51,9 @@ func NewClient(clientOpts ...Option) (*Client, error) {
 	if opts.trackingURI == "" {
 		opts.trackingURI = os.Getenv("MLFLOW_TRACKING_URI")
 	}
+	// WithHeaders canonicalizes header names, so this lookup matches any casing
+	// the caller used. An explicit Authorization header counts as opting out of
+	// the env-var fallback; otherwise the token round tripper would overwrite it.
 	if opts.token == "" && opts.tokenPath == "" && !opts.tokenSet && !opts.tokenPathSet && opts.headers["Authorization"] == "" {
 		opts.token = os.Getenv("MLFLOW_TRACKING_TOKEN")
 	}

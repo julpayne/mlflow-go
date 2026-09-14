@@ -2,7 +2,6 @@ package mlflow
 
 import (
 	"log/slog"
-	"maps"
 	"net/http"
 	"time"
 )
@@ -34,11 +33,15 @@ func WithTrackingURI(uri string) Option {
 
 // WithHeaders sets custom HTTP headers sent on every API request.
 // Use this to pass workspace headers, additional auth, or other metadata.
+// Header names are canonicalized (e.g. "authorization" becomes
+// "Authorization"), matching how net/http treats them on the wire.
 func WithHeaders(headers map[string]string) Option {
 	return func(o *options) {
 		if headers != nil {
 			o.headers = make(map[string]string, len(headers))
-			maps.Copy(o.headers, headers)
+			for k, v := range headers {
+				o.headers[http.CanonicalHeaderKey(k)] = v
+			}
 		}
 	}
 }

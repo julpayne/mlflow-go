@@ -504,30 +504,54 @@ func TestClient_EmptyTokenSuppressesEnvOnRequest(t *testing.T) {
 	}
 }
 
+// HTTP header names are case-insensitive, so an explicit Authorization header
+// must suppress the env-var fallback no matter how the caller spelled the key.
 func TestClient_ExplicitAuthHeaderNotClobberedByEnvToken(t *testing.T) {
-	var gotAuth string
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("2.18.0"))
-	}))
-	defer srv.Close()
+	for _, headerKey := range []string{"Authorization", "authorization", "AUTHORIZATION", "AuThOrIzAtIoN"} {
+		t.Run(headerKey, func(t *testing.T) {
+			var gotAuth string
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "text/plain")
+				w.Write([]byte("2.18.0"))
+			}))
+			defer srv.Close()
 
-	t.Setenv("MLFLOW_TRACKING_TOKEN", "AMBIENT-SA-TOKEN")
+			t.Setenv("MLFLOW_TRACKING_TOKEN", "AMBIENT-SA-TOKEN")
 
-	client, err := NewClient(
-		WithTrackingURI(srv.URL),
-		WithHTTPClient(srv.Client()),
-		WithHeaders(map[string]string{"Authorization": "Bearer APP-SCOPED-TOKEN"}),
-	)
-	if err != nil {
-		t.Fatalf("NewClient error: %v", err)
+			client, err := NewClient(
+				WithTrackingURI(srv.URL),
+				WithHTTPClient(srv.Client()),
+				WithHeaders(map[string]string{headerKey: "Bearer APP-SCOPED-TOKEN"}),
+			)
+			if err != nil {
+				t.Fatalf("NewClient error: %v", err)
+			}
+
+			if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
+				t.Fatalf("GetVersion error: %v", err)
+			}
+			if gotAuth != "Bearer APP-SCOPED-TOKEN" {
+				t.Errorf("Authorization = %q, want %q (explicit header clobbered by ambient env token)", gotAuth, "Bearer APP-SCOPED-TOKEN")
+			}
+		})
 	}
+}
 
-	if _, err := client.Tracking().GetVersion(context.Background()); err != nil {
-		t.Fatalf("GetVersion error: %v", err)
+func TestWithHeaders_CanonicalizesKeys(t *testing.T) {
+	var opts options
+	WithHeaders(map[string]string{
+		"authorization":  "Bearer t",
+		"x-custom-thing": "v",
+	})(&opts)
+
+	if got := opts.headers["Authorization"]; got != "Bearer t" {
+		t.Errorf(`headers["Authorization"] = %q, want %q`, got, "Bearer t")
 	}
-	if gotAuth != "Bearer APP-SCOPED-TOKEN" {
-		t.Errorf("Authorization = %q, want %q (explicit header clobbered by ambient env token)", gotAuth, "Bearer APP-SCOPED-TOKEN")
+	if got := opts.headers["X-Custom-Thing"]; got != "v" {
+		t.Errorf(`headers["X-Custom-Thing"] = %q, want %q`, got, "v")
+	}
+	if _, ok := opts.headers["authorization"]; ok {
+		t.Error("non-canonical key retained; lookups by canonical name will miss it")
 	}
 }
