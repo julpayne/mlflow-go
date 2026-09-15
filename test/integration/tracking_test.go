@@ -645,7 +645,11 @@ func TestGetOrCreateExperiment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateExperiment() first call error = %v", err)
 	}
-	t.Cleanup(func() { _ = client.Tracking().DeleteExperiment(ctx, exp1.ID) })
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_ = client.Tracking().DeleteExperiment(cleanupCtx, exp1.ID)
+	})
 
 	if exp1.ID == "" {
 		t.Fatal("Expected non-empty experiment ID")
