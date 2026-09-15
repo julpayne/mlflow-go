@@ -57,3 +57,17 @@ func WithDownloadExpiration(seconds int64) DownloadArtifactOption {
 		o.expiration = seconds
 	}
 }
+
+type uploadArtifactOptions struct {
+	contentType string
+}
+
+// UploadArtifactOption configures UploadArtifact (path-based, no run ID).
+type UploadArtifactOption func(*uploadArtifactOptions)
+
+// WithUploadContentType sets the Content-Type for path-based artifact upload.
+func WithUploadContentType(contentType string) UploadArtifactOption {
+	return func(o *uploadArtifactOptions) {
+		o.contentType = contentType
+	}
+}
