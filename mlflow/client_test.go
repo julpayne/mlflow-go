@@ -555,3 +555,19 @@ func TestWithHeaders_CanonicalizesKeys(t *testing.T) {
 		t.Error("non-canonical key retained; lookups by canonical name will miss it")
 	}
 }
+
+func TestClient_Workspaces_ReturnsSameInstance(t *testing.T) {
+	client, err := NewClient(
+		WithTrackingURI("https://mlflow.example.com"),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	w1 := client.Workspaces()
+	w2 := client.Workspaces()
+
+	if w1 != w2 {
+		t.Error("Workspaces() should return same instance")
+	}
+}
