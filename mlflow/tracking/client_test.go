@@ -562,6 +562,10 @@ func TestGetOrCreateExperiment_ExistingActive(t *testing.T) {
 
 func TestGetOrCreateExperiment_NotFoundThenCreate(t *testing.T) {
 	calls := 0
+	var createBody struct {
+		Name             string `json:"name"`
+		ArtifactLocation string `json:"artifact_location"`
+	}
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		calls++
@@ -570,6 +574,7 @@ func TestGetOrCreateExperiment_NotFoundThenCreate(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			mustEncodeJSON(t, w, map[string]string{"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "not found"})
 		case r.URL.Path == "/api/2.0/mlflow/experiments/create":
+			mustDecodeJSON(t, r, &createBody)
 			mustEncodeJSON(t, w, map[string]any{"experiment_id": "99"})
 		case r.URL.Path == "/api/2.0/mlflow/experiments/get-by-name" && calls == 3:
 			mustEncodeJSON(t, w, map[string]any{
@@ -585,7 +590,9 @@ func TestGetOrCreateExperiment_NotFoundThenCreate(t *testing.T) {
 		}
 	}))
 
-	exp, err := client.GetOrCreateExperiment(context.Background(), "new-exp")
+	exp, err := client.GetOrCreateExperiment(context.Background(), "new-exp",
+		WithArtifactLocation("s3://my-bucket/artifacts"),
+	)
 	if err != nil {
 		t.Fatalf("GetOrCreateExperiment() error = %v", err)
 	}
@@ -594,6 +601,9 @@ func TestGetOrCreateExperiment_NotFoundThenCreate(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Errorf("expected 3 server calls, got %d", calls)
+	}
+	if createBody.ArtifactLocation != "s3://my-bucket/artifacts" {
+		t.Errorf("artifact_location = %q, want %q", createBody.ArtifactLocation, "s3://my-bucket/artifacts")
 	}
 }
 
