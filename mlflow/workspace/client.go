@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	internalerrors "github.com/opendatahub-io/mlflow-go/internal/errors"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
@@ -51,8 +52,8 @@ func (c *Client) GetWorkspace(ctx context.Context, name string) (*Workspace, err
 	}
 
 	var resp workspaceResponse
-	path := fmt.Sprintf("/api/3.0/mlflow/workspaces/get?name=%s", name)
-	if err := c.transport.Get(ctx, path, nil, &resp); err != nil {
+	query := url.Values{"name": {name}}
+	if err := c.transport.Get(ctx, "/api/3.0/mlflow/workspaces/get", query, &resp); err != nil {
 		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
 	return workspaceFromResponse(&resp), nil
