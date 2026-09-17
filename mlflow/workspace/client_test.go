@@ -71,8 +71,7 @@ func TestGetWorkspace_Success(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		mustEncodeJSON(t, w, map[string]any{
 			"workspace": map[string]any{
-				"name":          "my-ws",
-				"creation_time": 1700000000000,
+				"name": "my-ws",
 			},
 		})
 	}))
@@ -83,9 +82,6 @@ func TestGetWorkspace_Success(t *testing.T) {
 	}
 	if ws.Name != "my-ws" {
 		t.Errorf("Name = %q, want %q", ws.Name, "my-ws")
-	}
-	if ws.CreationTime.IsZero() {
-		t.Error("CreationTime should not be zero")
 	}
 }
 
@@ -106,8 +102,7 @@ func TestCreateWorkspace_Success(t *testing.T) {
 		receivedName = req["name"]
 		mustEncodeJSON(t, w, map[string]any{
 			"workspace": map[string]any{
-				"name":          req["name"],
-				"creation_time": 1700000000000,
+				"name": req["name"],
 			},
 		})
 	}))
@@ -135,11 +130,10 @@ func TestCreateWorkspace_EmptyName(t *testing.T) {
 func TestEnsureWorkspace_CreatesNew(t *testing.T) {
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/3.0/mlflow/workspaces/create" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/3.0/mlflow/workspaces" {
 			mustEncodeJSON(t, w, map[string]any{
 				"workspace": map[string]any{
-					"name":          "new-ws",
-					"creation_time": 1700000000000,
+					"name": "new-ws",
 				},
 			})
 			return
@@ -161,7 +155,7 @@ func TestEnsureWorkspace_AlreadyExists(t *testing.T) {
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		calls++
-		if r.URL.Path == "/api/3.0/mlflow/workspaces/create" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/3.0/mlflow/workspaces" {
 			w.WriteHeader(http.StatusConflict)
 			mustEncodeJSON(t, w, map[string]string{
 				"error_code": "RESOURCE_ALREADY_EXISTS",
@@ -171,8 +165,7 @@ func TestEnsureWorkspace_AlreadyExists(t *testing.T) {
 		}
 		mustEncodeJSON(t, w, map[string]any{
 			"workspace": map[string]any{
-				"name":          "existing-ws",
-				"creation_time": 1700000000000,
+				"name": "existing-ws",
 			},
 		})
 	}))
@@ -197,8 +190,7 @@ func TestEnsureWorkspace_Default(t *testing.T) {
 		}
 		mustEncodeJSON(t, w, map[string]any{
 			"workspace": map[string]any{
-				"name":          "default",
-				"creation_time": 1700000000000,
+				"name": "default",
 			},
 		})
 	}))

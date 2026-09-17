@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path"
 
 	internalerrors "github.com/opendatahub-io/mlflow-go/internal/errors"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
@@ -40,8 +41,7 @@ func (c *Client) GetServerInfo(ctx context.Context) (*ServerInfo, error) {
 // workspaceResponse is the JSON shape returned by workspace CRUD endpoints.
 type workspaceResponse struct {
 	Workspace struct {
-		Name         string `json:"name"`
-		CreationTime int64  `json:"creation_time"`
+		Name string `json:"name"`
 	} `json:"workspace"`
 }
 
@@ -52,8 +52,8 @@ func (c *Client) GetWorkspace(ctx context.Context, name string) (*Workspace, err
 	}
 
 	var resp workspaceResponse
-	query := url.Values{"name": {name}}
-	if err := c.transport.Get(ctx, "/api/3.0/mlflow/workspaces/get", query, &resp); err != nil {
+	endpoint := path.Join("/api/3.0/mlflow/workspaces", url.PathEscape(name))
+	if err := c.transport.Get(ctx, endpoint, nil, &resp); err != nil {
 		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
 	return workspaceFromResponse(&resp), nil
@@ -67,7 +67,7 @@ func (c *Client) CreateWorkspace(ctx context.Context, name string) (*Workspace, 
 
 	req := map[string]string{"name": name}
 	var resp workspaceResponse
-	if err := c.transport.Post(ctx, "/api/3.0/mlflow/workspaces/create", req, &resp); err != nil {
+	if err := c.transport.Post(ctx, "/api/3.0/mlflow/workspaces", req, &resp); err != nil {
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
 	return workspaceFromResponse(&resp), nil
@@ -96,11 +96,7 @@ func (c *Client) EnsureWorkspace(ctx context.Context, name string) (*Workspace, 
 }
 
 func workspaceFromResponse(resp *workspaceResponse) *Workspace {
-	ws := &Workspace{
+	return &Workspace{
 		Name: resp.Workspace.Name,
 	}
-	if resp.Workspace.CreationTime > 0 {
-		ws.CreationTime = timeFromMillis(resp.Workspace.CreationTime)
-	}
-	return ws
 }
