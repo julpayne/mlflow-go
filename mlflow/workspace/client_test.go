@@ -3,10 +3,13 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/opendatahub-io/mlflow-go/internal/errors"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
@@ -43,6 +46,25 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 	}
 
 	return NewClient(tc)
+}
+
+// uniqueName returns a workspace name unique to this test run.
+// Names conform to the MLflow pattern ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$.
+func uniqueName(t *testing.T) string {
+	t.Helper()
+	slug := strings.ToLower(strings.ReplaceAll(t.Name(), "_", "-"))
+	slug = strings.ReplaceAll(slug, "/", "-")
+	return fmt.Sprintf("t-%s-%x", slug, time.Now().UnixNano())
+}
+
+// cleanupWorkspace registers a t.Cleanup that deletes the named workspace.
+func cleanupWorkspace(t *testing.T, client *Client, name string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := client.DeleteWorkspace(context.Background(), name); err != nil {
+			t.Logf("cleanup: failed to delete workspace %q: %v", name, err)
+		}
+	})
 }
 
 func mustEncodeJSON(t *testing.T, w http.ResponseWriter, v any) {
@@ -135,7 +157,20 @@ func TestGetWorkspace_EmptyName(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCreateWorkspace_Success(t *testing.T) {
-	skipIfLive(t, "avoid side effects on live service")
+	if isLive() {
+		client := newTestClient(t, nil)
+		name := uniqueName(t)
+		cleanupWorkspace(t, client, name)
+
+		ws, err := client.CreateWorkspace(context.Background(), name)
+		if err != nil {
+			t.Fatalf("CreateWorkspace(%q) error = %v", name, err)
+		}
+		if ws.Name != name {
+			t.Errorf("Name = %q, want %q", ws.Name, name)
+		}
+		return
+	}
 
 	var receivedName string
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,12 +200,96 @@ func TestCreateWorkspace_EmptyName(t *testing.T) {
 	}
 }
 
+func TestCreateWorkspace_InvalidName(t *testing.T) {
+	if isLive() {
+		client := newTestClient(t, nil)
+		_, err := client.CreateWorkspace(context.Background(), "UPPER_CASE!")
+		if err == nil {
+			t.Fatal("expected error for invalid workspace name")
+		}
+		t.Logf("got expected error: %v", err)
+		return
+	}
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		mustEncodeJSON(t, w, map[string]string{
+			"error_code": "INVALID_PARAMETER_VALUE",
+			"message":    "Workspace name must match the pattern ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+		})
+	}))
+
+	_, err := client.CreateWorkspace(context.Background(), "UPPER_CASE!")
+	if err == nil {
+		t.Fatal("expected error for invalid workspace name")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DeleteWorkspace
+// ---------------------------------------------------------------------------
+
+func TestDeleteWorkspace_Success(t *testing.T) {
+	if isLive() {
+		client := newTestClient(t, nil)
+		name := uniqueName(t)
+
+		_, err := client.CreateWorkspace(context.Background(), name)
+		if err != nil {
+			t.Fatalf("setup: CreateWorkspace(%q) error = %v", name, err)
+		}
+
+		if err := client.DeleteWorkspace(context.Background(), name); err != nil {
+			t.Fatalf("DeleteWorkspace(%q) error = %v", name, err)
+		}
+		return
+	}
+
+	deleted := false
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleted = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+
+	if err := client.DeleteWorkspace(context.Background(), "doomed-ws"); err != nil {
+		t.Fatalf("DeleteWorkspace() error = %v", err)
+	}
+	if !deleted {
+		t.Error("expected DELETE request")
+	}
+}
+
+func TestDeleteWorkspace_EmptyName(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if err := client.DeleteWorkspace(context.Background(), ""); err == nil {
+		t.Error("expected error for empty name")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // EnsureWorkspace
 // ---------------------------------------------------------------------------
 
 func TestEnsureWorkspace_CreatesNew(t *testing.T) {
-	skipIfLive(t, "tests create-path routing")
+	if isLive() {
+		client := newTestClient(t, nil)
+		name := uniqueName(t)
+		cleanupWorkspace(t, client, name)
+
+		ws, err := client.EnsureWorkspace(context.Background(), name)
+		if err != nil {
+			t.Fatalf("EnsureWorkspace(%q) error = %v", name, err)
+		}
+		if ws.Name != name {
+			t.Errorf("Name = %q, want %q", ws.Name, name)
+		}
+		return
+	}
 
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -191,7 +310,25 @@ func TestEnsureWorkspace_CreatesNew(t *testing.T) {
 }
 
 func TestEnsureWorkspace_AlreadyExists(t *testing.T) {
-	skipIfLive(t, "tests create→get fallback with RESOURCE_ALREADY_EXISTS")
+	if isLive() {
+		client := newTestClient(t, nil)
+		name := uniqueName(t)
+		cleanupWorkspace(t, client, name)
+
+		ws1, err := client.CreateWorkspace(context.Background(), name)
+		if err != nil {
+			t.Fatalf("setup: CreateWorkspace(%q) error = %v", name, err)
+		}
+
+		ws2, err := client.EnsureWorkspace(context.Background(), name)
+		if err != nil {
+			t.Fatalf("EnsureWorkspace(%q) error = %v", name, err)
+		}
+		if ws2.Name != ws1.Name {
+			t.Errorf("EnsureWorkspace returned %q, want %q", ws2.Name, ws1.Name)
+		}
+		return
+	}
 
 	calls := 0
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

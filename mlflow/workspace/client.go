@@ -73,6 +73,20 @@ func (c *Client) CreateWorkspace(ctx context.Context, name string) (*Workspace, 
 	return workspaceFromResponse(&resp), nil
 }
 
+// DeleteWorkspace deletes a workspace by name.
+func (c *Client) DeleteWorkspace(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("mlflow: workspace name is required")
+	}
+
+	endpoint := path.Join("/api/3.0/mlflow/workspaces", url.PathEscape(name))
+	if err := c.transport.Delete(ctx, endpoint, nil, nil); err != nil {
+		return fmt.Errorf("failed to delete workspace: %w", err)
+	}
+
+	return nil
+}
+
 // EnsureWorkspace idempotently creates a workspace.
 // It skips the "default" workspace (always exists) and handles
 // RESOURCE_ALREADY_EXISTS races from concurrent callers.
