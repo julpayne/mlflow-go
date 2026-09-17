@@ -141,11 +141,20 @@ func (c *Client) DoAbsoluteGetBody(ctx context.Context, absoluteURL string, head
 	return c.doAbsoluteBody(ctx, http.MethodGet, absoluteURL, headers)
 }
 
+// buildURL constructs the full request URL by appending path to the base URL
+// prefix. The path may contain percent-encoded segments (e.g. from
+// url.PathEscape); RawPath preserves them so they are not double-encoded.
+func (c *Client) buildURL(path string, query url.Values) *url.URL {
+	rawPath := strings.TrimRight(c.baseURL.Path, "/") + path
+	u := *c.baseURL
+	u.RawPath = rawPath
+	u.Path, _ = url.PathUnescape(rawPath)
+	u.RawQuery = query.Encode()
+	return &u
+}
+
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, result any) error {
-	// Build request URL, preserving any path prefix from the base URL
-	// (e.g., base "https://host/mlflow" + path "/api/2.0/mlflow/..." → "/mlflow/api/2.0/mlflow/...")
-	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+	reqURL := c.buildURL(path, query)
 
 	// Encode body if present
 	var bodyReader io.Reader
@@ -217,8 +226,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 }
 
 func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) ([]byte, string, error) {
-	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+	reqURL := c.buildURL(path, query)
 
 	var bodyReader io.Reader
 	if body != nil {
@@ -274,8 +282,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 }
 
 func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) (io.ReadCloser, error) {
-	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+	reqURL := c.buildURL(path, query)
 
 	var bodyReader io.Reader
 	if body != nil {

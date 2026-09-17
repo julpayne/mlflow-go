@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"path"
 
 	internalerrors "github.com/opendatahub-io/mlflow-go/internal/errors"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
@@ -52,7 +51,7 @@ func (c *Client) GetWorkspace(ctx context.Context, name string) (*Workspace, err
 	}
 
 	var resp workspaceResponse
-	endpoint := path.Join("/api/3.0/mlflow/workspaces", url.PathEscape(name))
+	endpoint := "/api/3.0/mlflow/workspaces/" + url.PathEscape(name)
 	if err := c.transport.Get(ctx, endpoint, nil, &resp); err != nil {
 		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
@@ -79,7 +78,7 @@ func (c *Client) DeleteWorkspace(ctx context.Context, name string) error {
 		return fmt.Errorf("mlflow: workspace name is required")
 	}
 
-	endpoint := path.Join("/api/3.0/mlflow/workspaces", url.PathEscape(name))
+	endpoint := "/api/3.0/mlflow/workspaces/" + url.PathEscape(name)
 	if err := c.transport.Delete(ctx, endpoint, nil, nil); err != nil {
 		return fmt.Errorf("failed to delete workspace: %w", err)
 	}
