@@ -146,9 +146,13 @@ func (c *Client) DoAbsoluteGetBody(ctx context.Context, absoluteURL string, head
 // url.PathEscape); RawPath preserves them so they are not double-encoded.
 func (c *Client) buildURL(path string, query url.Values) *url.URL {
 	rawPath := strings.TrimRight(c.baseURL.Path, "/") + path
+	decoded, err := url.PathUnescape(rawPath)
+	if err != nil {
+		decoded = rawPath
+	}
 	u := *c.baseURL
 	u.RawPath = rawPath
-	u.Path, _ = url.PathUnescape(rawPath)
+	u.Path = decoded
 	u.RawQuery = query.Encode()
 	return &u
 }
