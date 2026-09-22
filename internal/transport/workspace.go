@@ -23,8 +23,9 @@ type WorkspaceRoundTripper struct {
 	probeEnabled bool
 	baseURL      string
 
-	probeOnce sync.Once
-	enabled   atomic.Bool
+	probeMu sync.Mutex
+	probed  bool
+	enabled atomic.Bool
 }
 
 // WorkspaceRTConfig configures a WorkspaceRoundTripper.
@@ -72,11 +73,27 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) bool {
 	if !w.probeEnabled {
 		return true
 	}
+	return w.ensureProbed(req)
+}
 
-	w.probeOnce.Do(func() {
-		w.enabled.Store(w.probeWorkspaces(req))
-	})
-	return w.enabled.Load()
+// ensureProbed returns whether workspaces are supported, probing once for a
+// definitive answer. A definitive result (the server returned a parsable
+// server-info payload) is cached for the lifetime of the client. Transient
+// failures — network errors, non-200 responses, read errors, malformed JSON —
+// are not cached, so the next request retries rather than permanently
+// disabling the workspace header.
+func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) bool {
+	w.probeMu.Lock()
+	defer w.probeMu.Unlock()
+	if w.probed {
+		return w.enabled.Load()
+	}
+	supported, definitive := w.probeWorkspaces(req)
+	if definitive {
+		w.probed = true
+		w.enabled.Store(supported)
+	}
+	return supported
 }
 
 // sameOrigin reports whether req targets the same origin (scheme and host,
@@ -95,11 +112,15 @@ func (w *WorkspaceRoundTripper) sameOrigin(req *http.Request) bool {
 		strings.EqualFold(req.URL.Host, base.Host)
 }
 
-func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) bool {
+// probeWorkspaces asks the server whether workspaces are enabled. It returns
+// (supported, definitive): definitive is true only when the server answered
+// with a parsable server-info payload. Any failure that could be transient
+// returns (false, false) so the caller can retry.
+func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (supported, definitive bool) {
 	probeURL := w.baseURL + "/api/3.0/mlflow/server-info"
 	req, err := http.NewRequestWithContext(original.Context(), http.MethodGet, probeURL, nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	req.Header.Set("Accept", "application/json")
 	for k, v := range original.Header {
@@ -111,26 +132,26 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) bool {
 
 	resp, err := w.base.RoundTrip(req)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return false, false
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return false
+		return false, false
 	}
 
 	var info struct {
 		WorkspacesEnabled bool `json:"workspaces_enabled"`
 	}
 	if err := json.Unmarshal(body, &info); err != nil {
-		return false
+		return false, false
 	}
-	return info.WorkspacesEnabled
+	return info.WorkspacesEnabled, true
 }
 
 // IsWorkspacesEnabled returns whether the probe detected workspaces support.
@@ -146,9 +167,7 @@ func (w *WorkspaceRoundTripper) ForceProbe() {
 	if err != nil {
 		return
 	}
-	w.probeOnce.Do(func() {
-		w.enabled.Store(w.probeWorkspaces(req))
-	})
+	w.ensureProbed(req)
 }
 
 // WrapClientWithWorkspace returns a shallow copy of the HTTP client with

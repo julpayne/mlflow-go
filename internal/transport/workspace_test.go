@@ -152,6 +152,65 @@ func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOff(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRoundTripper_TransientProbeFailure_Retries(t *testing.T) {
+	var probeCount int
+	var apiHeaders []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/3.0/mlflow/server-info" {
+			probeCount++
+			if probeCount == 1 {
+				// A transient failure must not be cached permanently.
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+			return
+		}
+		apiHeaders = append(apiHeaders, r.Header.Get("X-MLFLOW-WORKSPACE"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &http.Client{
+		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+			Base:         http.DefaultTransport,
+			Workspace:    "ws",
+			ProbeEnabled: true,
+			BaseURL:      server.URL,
+		}),
+	}
+
+	// First request: probe fails transiently, so the header is skipped but the
+	// failure is not cached.
+	resp, err := client.Get(server.URL + "/api/2.0/x")
+	if err != nil {
+		t.Fatalf("first request error: %v", err)
+	}
+	resp.Body.Close()
+
+	// Second request: the probe is retried and now succeeds, so the header is
+	// attached.
+	resp, err = client.Get(server.URL + "/api/2.0/x")
+	if err != nil {
+		t.Fatalf("second request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if probeCount != 2 {
+		t.Errorf("expected probe to be retried (2 calls), got %d", probeCount)
+	}
+	if len(apiHeaders) != 2 {
+		t.Fatalf("expected 2 API calls, got %d", len(apiHeaders))
+	}
+	if apiHeaders[0] != "" {
+		t.Errorf("first request: expected no header after transient failure, got %q", apiHeaders[0])
+	}
+	if apiHeaders[1] != "ws" {
+		t.Errorf("second request: expected header after successful retry, got %q", apiHeaders[1])
+	}
+}
+
 func TestWorkspaceRoundTripper_ProbeCached(t *testing.T) {
 	probeCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
