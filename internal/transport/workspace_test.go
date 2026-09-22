@@ -210,6 +210,44 @@ func TestWorkspaceRoundTripper_ProbeFailure_SkipsHeader(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRoundTripper_CrossOriginRedirect(t *testing.T) {
+	var otherHeader string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+
+	var originHeader string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		http.Redirect(w, r, other.URL+"/redirected", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	client := &http.Client{
+		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+			Base:         http.DefaultTransport,
+			Workspace:    "my-workspace",
+			ProbeEnabled: false,
+			BaseURL:      origin.URL,
+		}),
+	}
+
+	resp, err := client.Get(origin.URL + "/api/2.0/mlflow/experiments/list")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if originHeader != "my-workspace" {
+		t.Errorf("origin request X-MLFLOW-WORKSPACE = %q, want %q", originHeader, "my-workspace")
+	}
+	if otherHeader != "" {
+		t.Errorf("cross-origin redirect must not receive workspace header, got %q", otherHeader)
+	}
+}
+
 func TestWrapClientWithWorkspace_NoWorkspace(t *testing.T) {
 	original := &http.Client{}
 	result := WrapClientWithWorkspace(original, "", "http://localhost", false)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 )
@@ -16,10 +17,10 @@ const workspaceHeader = "X-MLFLOW-WORKSPACE"
 // the result is cached for all subsequent requests. When probeEnabled
 // is false, the header is always attached.
 type WorkspaceRoundTripper struct {
-	base          http.RoundTripper
-	workspace     string
-	probeEnabled  bool
-	baseURL       string
+	base         http.RoundTripper
+	workspace    string
+	probeEnabled bool
+	baseURL      string
 
 	probeOnce sync.Once
 	enabled   bool
@@ -57,6 +58,12 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) bool {
 	if w.workspace == "" {
 		return false
 	}
+	// Only attach the workspace header to requests aimed at the configured
+	// origin. This guards against leaking the header to a different host if
+	// the client follows a cross-origin redirect.
+	if !w.sameOrigin(req) {
+		return false
+	}
 	if !w.probeEnabled {
 		return true
 	}
@@ -65,6 +72,22 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) bool {
 		w.enabled = w.probeWorkspaces(req)
 	})
 	return w.enabled
+}
+
+// sameOrigin reports whether req targets the same origin (scheme and host,
+// compared case-insensitively) as the configured base URL. Requests with a
+// missing URL, or a base URL that cannot be parsed or has no host, are
+// treated as cross-origin and rejected.
+func (w *WorkspaceRoundTripper) sameOrigin(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	base, err := url.Parse(w.baseURL)
+	if err != nil || base.Host == "" {
+		return false
+	}
+	return strings.EqualFold(req.URL.Scheme, base.Scheme) &&
+		strings.EqualFold(req.URL.Host, base.Host)
 }
 
 func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) bool {
