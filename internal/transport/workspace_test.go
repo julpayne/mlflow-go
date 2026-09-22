@@ -294,6 +294,45 @@ func TestWorkspaceRoundTripper_SameOrigin(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRoundTripper_StripsCallerHeaderWhenNotAttached(t *testing.T) {
+	var forwarded string
+	base := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		forwarded = r.Header.Get("X-MLFLOW-WORKSPACE")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	// Cross-origin request: attachment is not allowed, so a caller-supplied
+	// workspace header must be stripped rather than leaked.
+	rt := NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Base:      base,
+		Workspace: "ws",
+		BaseURL:   "https://mlflow.example.com",
+	})
+	req, err := http.NewRequest(http.MethodGet, "https://evil.example.com/api", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("X-MLFLOW-WORKSPACE", "leaked")
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip error: %v", err)
+	}
+	resp.Body.Close()
+
+	if forwarded != "" {
+		t.Errorf("cross-origin request forwarded workspace header %q, want stripped", forwarded)
+	}
+	// The caller's original request must not be mutated.
+	if req.Header.Get("X-MLFLOW-WORKSPACE") != "leaked" {
+		t.Error("caller request header was mutated")
+	}
+}
+
 func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	var probeAuth, probeWS string
 	var sawProbe bool

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const workspaceHeader = "X-MLFLOW-WORKSPACE"
@@ -23,7 +24,7 @@ type WorkspaceRoundTripper struct {
 	baseURL      string
 
 	probeOnce sync.Once
-	enabled   bool
+	enabled   atomic.Bool
 }
 
 // WorkspaceRTConfig configures a WorkspaceRoundTripper.
@@ -46,12 +47,16 @@ func NewWorkspaceRoundTripper(cfg WorkspaceRTConfig) http.RoundTripper {
 }
 
 func (w *WorkspaceRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone so the caller's request is never mutated, and drop any inbound
+	// workspace header so we never forward one we did not sanction (e.g. a
+	// caller-supplied header on a cross-origin request). The header is
+	// re-added below only when attachment is allowed for this request.
+	r := req.Clone(req.Context())
+	r.Header.Del(workspaceHeader)
 	if w.shouldAttach(req) {
-		r := req.Clone(req.Context())
 		r.Header.Set(workspaceHeader, w.workspace)
-		return w.base.RoundTrip(r)
 	}
-	return w.base.RoundTrip(req)
+	return w.base.RoundTrip(r)
 }
 
 func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) bool {
@@ -69,9 +74,9 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) bool {
 	}
 
 	w.probeOnce.Do(func() {
-		w.enabled = w.probeWorkspaces(req)
+		w.enabled.Store(w.probeWorkspaces(req))
 	})
-	return w.enabled
+	return w.enabled.Load()
 }
 
 // sameOrigin reports whether req targets the same origin (scheme and host,
@@ -131,7 +136,7 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) bool {
 // IsWorkspacesEnabled returns whether the probe detected workspaces support.
 // Returns false if probing has not yet occurred or if probing is disabled.
 func (w *WorkspaceRoundTripper) IsWorkspacesEnabled() bool {
-	return w.enabled
+	return w.enabled.Load()
 }
 
 // ForceProbe triggers the workspace probe immediately, using the provided
@@ -142,7 +147,7 @@ func (w *WorkspaceRoundTripper) ForceProbe() {
 		return
 	}
 	w.probeOnce.Do(func() {
-		w.enabled = w.probeWorkspaces(req)
+		w.enabled.Store(w.probeWorkspaces(req))
 	})
 }
 
