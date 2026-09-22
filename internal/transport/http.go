@@ -88,22 +88,45 @@ func New(cfg Config) (*Client, error) {
 
 // Get performs a GET request to the specified path with query parameters.
 func (c *Client) Get(ctx context.Context, path string, query url.Values, result any) error {
-	return c.do(ctx, http.MethodGet, path, query, nil, result)
+	return c.do(ctx, http.MethodGet, c.buildURL(path, query), nil, result)
+}
+
+// GetEscaped performs a GET request where escapedPath is already
+// percent-encoded (e.g. via url.PathEscape). The encoding is preserved so a
+// single path segment containing reserved characters is neither re-encoded nor
+// split into multiple segments.
+func (c *Client) GetEscaped(ctx context.Context, escapedPath string, query url.Values, result any) error {
+	reqURL, err := c.buildEscapedURL(escapedPath, query)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodGet, reqURL, nil, result)
 }
 
 // Post performs a POST request to the specified path with a JSON body.
 func (c *Client) Post(ctx context.Context, path string, body, result any) error {
-	return c.do(ctx, http.MethodPost, path, nil, body, result)
+	return c.do(ctx, http.MethodPost, c.buildURL(path, nil), body, result)
 }
 
 // Delete performs a DELETE request to the specified path with a JSON body.
 func (c *Client) Delete(ctx context.Context, path string, body, result any) error {
-	return c.do(ctx, http.MethodDelete, path, nil, body, result)
+	return c.do(ctx, http.MethodDelete, c.buildURL(path, nil), body, result)
+}
+
+// DeleteEscaped performs a DELETE request where escapedPath is already
+// percent-encoded (e.g. via url.PathEscape). See GetEscaped for the encoding
+// contract.
+func (c *Client) DeleteEscaped(ctx context.Context, escapedPath string, body, result any) error {
+	reqURL, err := c.buildEscapedURL(escapedPath, nil)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, reqURL, body, result)
 }
 
 // Patch performs a PATCH request to the specified path with a JSON body.
 func (c *Client) Patch(ctx context.Context, path string, body, result any) error {
-	return c.do(ctx, http.MethodPatch, path, nil, body, result)
+	return c.do(ctx, http.MethodPatch, c.buildURL(path, nil), body, result)
 }
 
 // GetBytes performs a GET request and returns the raw response body.
@@ -141,12 +164,57 @@ func (c *Client) DoAbsoluteGetBody(ctx context.Context, absoluteURL string, head
 	return c.doAbsoluteBody(ctx, http.MethodGet, absoluteURL, headers)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, result any) error {
-	// Build request URL, preserving any path prefix from the base URL
-	// (e.g., base "https://host/mlflow" + path "/api/2.0/mlflow/..." → "/mlflow/api/2.0/mlflow/...")
-	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+// buildURL constructs the full request URL by appending path to the base URL
+// prefix. The path is treated as a literal (raw) value: reserved characters are
+// percent-encoded exactly once during serialization. This preserves raw-path
+// handling for callers such as the artifacts client that pass storage paths
+// verbatim. Callers that need a single, already-escaped path segment (e.g. a
+// name containing "/") must use buildEscapedURL instead.
+func (c *Client) buildURL(path string, query url.Values) *url.URL {
+	// Build the escaped request path from the base URL's escaped prefix plus the
+	// escaped literal suffix, then keep it in RawPath. This:
+	//   - preserves any encoding in the base prefix (e.g. https://host/api%2Fv1)
+	//     rather than decoding it to raw separators;
+	//   - encodes reserved characters in path exactly once (literal handling);
+	//   - unlike ResolveReference, does not collapse "." or ".." segments, so
+	//     storage object paths containing them are left intact.
+	rawPath := strings.TrimRight(c.baseURL.EscapedPath(), "/") + (&url.URL{Path: path}).EscapedPath()
+	decoded, err := url.PathUnescape(rawPath)
+	if err != nil {
+		// rawPath is assembled from validly-escaped parts, so this is
+		// unreachable in practice; fall back defensively.
+		decoded = rawPath
+	}
+	u := *c.baseURL
+	u.RawPath = rawPath
+	u.Path = decoded
+	u.RawQuery = query.Encode()
+	return &u
+}
 
+// buildEscapedURL constructs the full request URL from an already
+// percent-encoded path (e.g. produced by url.PathEscape). RawPath preserves the
+// caller's escaping so it is not double-encoded, while Path holds the decoded
+// form required by net/url. Unlike buildURL, this does not treat reserved
+// characters as literals: it trusts the caller to have escaped each path
+// segment.
+func (c *Client) buildEscapedURL(escapedPath string, query url.Values) (*url.URL, error) {
+	// Use the base URL's escaped path so any encoding in the base prefix
+	// (e.g. https://host/api%2Fv1) is preserved rather than decoded into raw
+	// separators when assigned to RawPath below.
+	rawPath := strings.TrimRight(c.baseURL.EscapedPath(), "/") + escapedPath
+	decoded, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid escaped path %q: %w", escapedPath, err)
+	}
+	u := *c.baseURL
+	u.RawPath = rawPath
+	u.Path = decoded
+	u.RawQuery = query.Encode()
+	return &u, nil
+}
+
+func (c *Client) do(ctx context.Context, method string, reqURL *url.URL, body, result any) error {
 	// Encode body if present
 	var bodyReader io.Reader
 	if body != nil {
@@ -195,10 +263,10 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		)
 	}
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
+	// Read response body (bounded by maxResponseBodySize)
+	respBody, err := readResponseBody(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return err
 	}
 
 	// Handle error responses
@@ -217,8 +285,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 }
 
 func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) ([]byte, string, error) {
-	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+	reqURL := c.buildURL(path, query)
 
 	var bodyReader io.Reader
 	if body != nil {
@@ -274,8 +341,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 }
 
 func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) (io.ReadCloser, error) {
-	fullPath := strings.TrimRight(c.baseURL.Path, "/") + path
-	reqURL := c.baseURL.ResolveReference(&url.URL{Path: fullPath, RawQuery: query.Encode()})
+	reqURL := c.buildURL(path, query)
 
 	var bodyReader io.Reader
 	if body != nil {
