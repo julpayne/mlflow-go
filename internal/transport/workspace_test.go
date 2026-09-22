@@ -77,7 +77,7 @@ func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOn(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
 			return
 		}
 		apiHeaders = append(apiHeaders, r.Header.Get("X-MLFLOW-WORKSPACE"))
@@ -121,7 +121,7 @@ func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOff(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": false})
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": false})
 			return
 		}
 		apiHeaders = append(apiHeaders, r.Header.Get("X-MLFLOW-WORKSPACE"))
@@ -217,7 +217,7 @@ func TestWorkspaceRoundTripper_ProbeCached(t *testing.T) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			probeCount++
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
 			return
 		}
 		w.WriteHeader(http.StatusOK)
