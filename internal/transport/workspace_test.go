@@ -152,6 +152,49 @@ func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOff(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRoundTripper_ProbeNotFound_CachedDefinitive(t *testing.T) {
+	var probeCount int
+	var apiHeaders []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/3.0/mlflow/server-info" {
+			probeCount++
+			// Pre-workspace server: the route does not exist.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		apiHeaders = append(apiHeaders, r.Header.Get("X-MLFLOW-WORKSPACE"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &http.Client{
+		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+			Base:         http.DefaultTransport,
+			Workspace:    "ws",
+			ProbeEnabled: true,
+			BaseURL:      server.URL,
+		}),
+	}
+
+	for i := 0; i < 3; i++ {
+		resp, err := client.Get(server.URL + "/api/2.0/x")
+		if err != nil {
+			t.Fatalf("request %d error: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+
+	// A 404 is definitive: probe once, then stop re-probing older servers.
+	if probeCount != 1 {
+		t.Errorf("expected 404 probe to be cached (1 probe), got %d", probeCount)
+	}
+	for i, h := range apiHeaders {
+		if h != "" {
+			t.Errorf("request %d: expected no workspace header, got %q", i, h)
+		}
+	}
+}
+
 func TestWorkspaceRoundTripper_TransientProbeFailure_Retries(t *testing.T) {
 	var probeCount int
 	var apiHeaders []string

@@ -137,6 +137,14 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+			// The server has no server-info route, so it predates the
+			// workspace feature: workspaces are definitively unsupported.
+			// Cache this so we stop probing older servers on every request.
+			return false, true
+		}
+		// Any other status may be transient (e.g. 5xx, auth hiccup); retry.
 		return false, false
 	}
 
