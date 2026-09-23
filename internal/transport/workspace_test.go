@@ -224,16 +224,16 @@ func TestWorkspaceRoundTripper_TransientProbeFailure_Retries(t *testing.T) {
 		}),
 	}
 
-	// First request: probe fails transiently, so the header is skipped but the
-	// failure is not cached.
+	// First request: the probe fails transiently, so the request errors out
+	// (rather than silently proceeding) and the failure is not cached.
 	resp, err := client.Get(server.URL + "/api/2.0/x")
-	if err != nil {
-		t.Fatalf("first request error: %v", err)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected first request to error on transient probe failure")
 	}
-	resp.Body.Close()
 
 	// Second request: the probe is retried and now succeeds, so the header is
-	// attached.
+	// attached and the request goes through.
 	resp, err = client.Get(server.URL + "/api/2.0/x")
 	if err != nil {
 		t.Fatalf("second request error: %v", err)
@@ -243,14 +243,12 @@ func TestWorkspaceRoundTripper_TransientProbeFailure_Retries(t *testing.T) {
 	if probeCount != 2 {
 		t.Errorf("expected probe to be retried (2 calls), got %d", probeCount)
 	}
-	if len(apiHeaders) != 2 {
-		t.Fatalf("expected 2 API calls, got %d", len(apiHeaders))
+	// Only the second request reaches the API (the first failed at the probe).
+	if len(apiHeaders) != 1 {
+		t.Fatalf("expected 1 API call, got %d", len(apiHeaders))
 	}
-	if apiHeaders[0] != "" {
-		t.Errorf("first request: expected no header after transient failure, got %q", apiHeaders[0])
-	}
-	if apiHeaders[1] != "ws" {
-		t.Errorf("second request: expected header after successful retry, got %q", apiHeaders[1])
+	if apiHeaders[0] != "ws" {
+		t.Errorf("expected header after successful retry, got %q", apiHeaders[0])
 	}
 }
 
@@ -289,14 +287,14 @@ func TestWorkspaceRoundTripper_ProbeCached(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRoundTripper_ProbeFailure_SkipsHeader(t *testing.T) {
-	var receivedHeader string
+func TestWorkspaceRoundTripper_ProbeFailure_ReturnsError(t *testing.T) {
+	var apiReached bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		apiReached = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -310,14 +308,15 @@ func TestWorkspaceRoundTripper_ProbeFailure_SkipsHeader(t *testing.T) {
 		}),
 	}
 
+	// An inconclusive probe failure must surface as an error rather than
+	// silently sending the request without the workspace header.
 	resp, err := client.Get(server.URL + "/test")
-	if err != nil {
-		t.Fatalf("request error: %v", err)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected an error when the probe fails inconclusively")
 	}
-	resp.Body.Close()
-
-	if receivedHeader != "" {
-		t.Errorf("expected no workspace header on probe failure, got %q", receivedHeader)
+	if apiReached {
+		t.Error("API request must not be sent when the probe fails inconclusively")
 	}
 }
 
@@ -371,6 +370,9 @@ func TestWorkspaceRoundTripper_SameOrigin(t *testing.T) {
 		{"different host", "https://mlflow.example.com", "https://evil.example.com/api", false},
 		{"different scheme", "https://mlflow.example.com", "http://mlflow.example.com/api", false},
 		{"different port", "https://mlflow.example.com:8443", "https://mlflow.example.com/api", false},
+		{"explicit https default port on base", "https://mlflow.example.com:443", "https://mlflow.example.com/api", true},
+		{"explicit https default port on request", "https://mlflow.example.com", "https://mlflow.example.com:443/api", true},
+		{"explicit http default port", "http://mlflow.example.com:80", "http://mlflow.example.com/api", true},
 		{"empty base URL", "", "https://mlflow.example.com/api", false},
 		{"unparseable base URL", "://bad", "https://mlflow.example.com/api", false},
 	}
@@ -487,15 +489,15 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRoundTripper_ProbeMalformedJSON_SkipsHeader(t *testing.T) {
-	var apiHeader string
+func TestWorkspaceRoundTripper_ProbeMalformedJSON_ReturnsError(t *testing.T) {
+	var apiReached bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte("{not-json"))
 			return
 		}
-		apiHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		apiReached = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -510,25 +512,22 @@ func TestWorkspaceRoundTripper_ProbeMalformedJSON_SkipsHeader(t *testing.T) {
 	}
 
 	resp, err := client.Get(server.URL + "/api/2.0/mlflow/experiments/list")
-	if err != nil {
-		t.Fatalf("request error: %v", err)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected an error when the probe response is malformed")
 	}
-	resp.Body.Close()
-
-	if apiHeader != "" {
-		t.Errorf("expected no workspace header on malformed probe JSON, got %q", apiHeader)
+	if apiReached {
+		t.Error("API request must not be sent when the probe response is malformed")
 	}
 }
 
-func TestWorkspaceRoundTripper_ProbeNetworkError_SkipsHeader(t *testing.T) {
+func TestWorkspaceRoundTripper_ProbeNetworkError_ReturnsError(t *testing.T) {
 	var apiCalled bool
-	var apiHeader string
 	base := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			return nil, errors.New("probe failed")
 		}
 		apiCalled = true
-		apiHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("")),
@@ -548,16 +547,12 @@ func TestWorkspaceRoundTripper_ProbeNetworkError_SkipsHeader(t *testing.T) {
 		t.Fatalf("build request: %v", err)
 	}
 	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("round trip error: %v", err)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected an error when the probe request fails")
 	}
-	resp.Body.Close()
-
-	if !apiCalled {
-		t.Fatal("API request was not made")
-	}
-	if apiHeader != "" {
-		t.Errorf("expected no workspace header on probe network error, got %q", apiHeader)
+	if apiCalled {
+		t.Error("API request must not be sent when the probe request fails")
 	}
 }
 
@@ -586,7 +581,9 @@ func TestWorkspaceRoundTripper_ForceProbe(t *testing.T) {
 	if wrt.IsWorkspacesEnabled() {
 		t.Error("IsWorkspacesEnabled() = true before probe, want false")
 	}
-	wrt.ForceProbe()
+	if err := wrt.ForceProbe(); err != nil {
+		t.Fatalf("ForceProbe error: %v", err)
+	}
 	if !wrt.IsWorkspacesEnabled() {
 		t.Error("IsWorkspacesEnabled() = false after ForceProbe, want true")
 	}

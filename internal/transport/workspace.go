@@ -2,6 +2,7 @@ package transport
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -54,52 +55,64 @@ func (w *WorkspaceRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	// re-added below only when attachment is allowed for this request.
 	r := req.Clone(req.Context())
 	r.Header.Del(workspaceHeader)
-	if w.shouldAttach(req) {
+	attach, err := w.shouldAttach(req)
+	if err != nil {
+		// A workspace was configured but the probe could not determine
+		// whether the server supports it. Fail loudly rather than silently
+		// sending the request without the header, which could land writes in
+		// the default workspace by mistake.
+		return nil, err
+	}
+	if attach {
 		r.Header.Set(workspaceHeader, w.workspace)
 	}
 	return w.base.RoundTrip(r)
 }
 
-func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) bool {
+func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) (bool, error) {
 	if w.workspace == "" {
-		return false
+		return false, nil
 	}
 	// Only attach the workspace header to requests aimed at the configured
 	// origin. This guards against leaking the header to a different host if
 	// the client follows a cross-origin redirect.
 	if !w.sameOrigin(req) {
-		return false
+		return false, nil
 	}
 	if !w.probeEnabled {
-		return true
+		return true, nil
 	}
 	return w.ensureProbed(req)
 }
 
 // ensureProbed returns whether workspaces are supported, probing once for a
 // definitive answer. A definitive result (the server returned a parsable
-// server-info payload) is cached for the lifetime of the client. Transient
-// failures — network errors, non-200 responses, read errors, malformed JSON —
-// are not cached, so the next request retries rather than permanently
-// disabling the workspace header.
-func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) bool {
+// server-info payload, or reported the route as absent) is cached for the
+// lifetime of the client. An inconclusive failure — network error, transient
+// status, read error, malformed JSON — is not cached and is returned as an
+// error so the caller can surface it and retry, rather than silently
+// proceeding without the workspace header.
+func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) (bool, error) {
 	w.probeMu.Lock()
 	defer w.probeMu.Unlock()
 	if w.probed {
-		return w.enabled.Load()
+		return w.enabled.Load(), nil
 	}
-	supported, definitive := w.probeWorkspaces(req)
-	if definitive {
-		w.probed = true
-		w.enabled.Store(supported)
+	supported, definitive, err := w.probeWorkspaces(req)
+	if !definitive {
+		return false, fmt.Errorf("workspace probe failed: %w", err)
 	}
-	return supported
+	w.probed = true
+	w.enabled.Store(supported)
+	return supported, nil
 }
 
-// sameOrigin reports whether req targets the same origin (scheme and host,
-// compared case-insensitively) as the configured base URL. Requests with a
-// missing URL, or a base URL that cannot be parsed or has no host, are
-// treated as cross-origin and rejected.
+// sameOrigin reports whether req targets the same origin as the configured
+// base URL. Scheme and host are compared case-insensitively, and the default
+// port for the scheme is normalized so that, e.g., https://example.com and
+// https://example.com:443 are treated as the same origin. Requests with a
+// missing URL, or a base URL that cannot be parsed or has no host, are treated
+// as cross-origin and rejected.
 func (w *WorkspaceRoundTripper) sameOrigin(req *http.Request) bool {
 	if req == nil || req.URL == nil {
 		return false
@@ -109,18 +122,35 @@ func (w *WorkspaceRoundTripper) sameOrigin(req *http.Request) bool {
 		return false
 	}
 	return strings.EqualFold(req.URL.Scheme, base.Scheme) &&
-		strings.EqualFold(req.URL.Host, base.Host)
+		strings.EqualFold(canonicalHostPort(req.URL), canonicalHostPort(base))
+}
+
+// canonicalHostPort returns host:port for u, substituting the scheme's default
+// port when none is given, so origins that differ only by an explicit default
+// port compare equal.
+func canonicalHostPort(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	return u.Hostname() + ":" + port
 }
 
 // probeWorkspaces asks the server whether workspaces are enabled. It returns
-// (supported, definitive): definitive is true only when the server answered
-// with a parsable server-info payload. Any failure that could be transient
-// returns (false, false) so the caller can retry.
-func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (supported, definitive bool) {
+// (supported, definitive, err): definitive is true when the server gave a
+// conclusive answer — a parsable server-info payload, or a status indicating
+// the route is absent. An inconclusive failure returns (false, false, err) so
+// the caller can surface the error and retry.
+func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (supported, definitive bool, err error) {
 	probeURL := w.baseURL + "/api/3.0/mlflow/server-info"
 	req, err := http.NewRequestWithContext(original.Context(), http.MethodGet, probeURL, nil)
 	if err != nil {
-		return false, false
+		return false, false, fmt.Errorf("build probe request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	for k, v := range original.Header {
@@ -132,7 +162,7 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 
 	resp, err := w.base.RoundTrip(req)
 	if err != nil {
-		return false, false
+		return false, false, fmt.Errorf("probe request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -142,24 +172,24 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 			// The server has no server-info route, so it predates the
 			// workspace feature: workspaces are definitively unsupported.
 			// Cache this so we stop probing older servers on every request.
-			return false, true
+			return false, true, nil
 		}
 		// Any other status may be transient (e.g. 5xx, auth hiccup); retry.
-		return false, false
+		return false, false, fmt.Errorf("probe returned status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return false, false
+		return false, false, fmt.Errorf("read probe response: %w", err)
 	}
 
 	var info struct {
 		WorkspacesEnabled bool `json:"workspaces_enabled"`
 	}
 	if err := json.Unmarshal(body, &info); err != nil {
-		return false, false
+		return false, false, fmt.Errorf("parse probe response: %w", err)
 	}
-	return info.WorkspacesEnabled, true
+	return info.WorkspacesEnabled, true, nil
 }
 
 // IsWorkspacesEnabled returns whether the probe detected workspaces support.
@@ -168,14 +198,16 @@ func (w *WorkspaceRoundTripper) IsWorkspacesEnabled() bool {
 	return w.enabled.Load()
 }
 
-// ForceProbe triggers the workspace probe immediately, using the provided
-// base URL to construct the probe request. This is useful for testing.
-func (w *WorkspaceRoundTripper) ForceProbe() {
+// ForceProbe triggers the workspace probe immediately, using the configured
+// base URL to construct the probe request. It returns any inconclusive probe
+// error. This is useful for testing.
+func (w *WorkspaceRoundTripper) ForceProbe() error {
 	req, err := http.NewRequest(http.MethodGet, w.baseURL+"/", nil) //nolint:noctx // probe helper
 	if err != nil {
-		return
+		return err
 	}
-	w.ensureProbed(req)
+	_, err = w.ensureProbed(req)
+	return err
 }
 
 // WrapClientWithWorkspace returns a shallow copy of the HTTP client with
