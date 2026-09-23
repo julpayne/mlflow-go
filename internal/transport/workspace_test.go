@@ -1,13 +1,16 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // roundTripperFunc adapts a function to http.RoundTripper for tests that need
@@ -645,4 +648,57 @@ func TestWrapClientWithWorkspace_NoWorkspace(t *testing.T) {
 	if result != original {
 		t.Error("expected same client when workspace is empty")
 	}
+}
+
+// TestWorkspaceRoundTripper_ProbeContextCanceled verifies that a request whose
+// context is canceled while another probe holds the probe slot stops waiting
+// and returns the context error, rather than blocking on the probe.
+func TestWorkspaceRoundTripper_ProbeContextCanceled(t *testing.T) {
+	var hits int32
+	base := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&hits, 1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"workspaces_enabled":true}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
+		Base:         base,
+		Workspace:    "ws",
+		ProbeEnabled: true,
+		BaseURL:      "http://mlflow.example.com",
+	}).(*WorkspaceRoundTripper)
+
+	// Occupy the probe slot so the request below must wait for it.
+	rt.probeSem <- struct{}{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://mlflow.example.com/api", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, rtErr := rt.RoundTrip(req)
+		errCh <- rtErr
+	}()
+
+	// The request is blocked waiting for the probe slot; cancel it.
+	cancel()
+
+	select {
+	case rtErr := <-errCh:
+		if !errors.Is(rtErr, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", rtErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RoundTrip did not return after context cancellation")
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("base transport hit %d times, want 0", got)
+	}
+
+	<-rt.probeSem // release the slot we occupied
 }

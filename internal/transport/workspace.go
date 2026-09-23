@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 )
 
@@ -24,9 +23,14 @@ type WorkspaceRoundTripper struct {
 	probeEnabled bool
 	baseURL      string
 
-	probeMu sync.Mutex
-	probed  bool
-	enabled atomic.Bool
+	// probeSem is a capacity-1 semaphore guarding the one-shot probe. Acquiring
+	// it via a select also honors request cancellation, so a canceled request
+	// does not block waiting for an in-flight probe. Buffered-channel
+	// happens-before ordering makes the plain probed bool safe to read and write
+	// while the slot is held.
+	probeSem chan struct{}
+	probed   bool
+	enabled  atomic.Bool
 }
 
 // workspaceRTConfig configures a WorkspaceRoundTripper.
@@ -45,6 +49,7 @@ func newWorkspaceRoundTripper(cfg workspaceRTConfig) http.RoundTripper {
 		workspace:    cfg.Workspace,
 		probeEnabled: cfg.ProbeEnabled,
 		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
+		probeSem:     make(chan struct{}, 1),
 	}
 }
 
@@ -60,7 +65,12 @@ func (w *WorkspaceRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 		// A workspace was configured but the probe could not determine
 		// whether the server supports it. Fail loudly rather than silently
 		// sending the request without the header, which could land writes in
-		// the default workspace by mistake.
+		// the default workspace by mistake. The base RoundTripper is never
+		// reached on this path, so close the request body ourselves to honor
+		// the RoundTripper contract and avoid leaking it.
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
 		return nil, err
 	}
 	if attach {
@@ -93,8 +103,14 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) (bool, error) {
 // error so the caller can surface it and retry, rather than silently
 // proceeding without the workspace header.
 func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) (bool, error) {
-	w.probeMu.Lock()
-	defer w.probeMu.Unlock()
+	// Acquire the probe slot, but honor request cancellation so a canceled
+	// request stops waiting for an in-flight probe instead of blocking on it.
+	select {
+	case w.probeSem <- struct{}{}:
+		defer func() { <-w.probeSem }()
+	case <-req.Context().Done():
+		return false, req.Context().Err()
+	}
 	if w.probed {
 		return w.enabled.Load(), nil
 	}
