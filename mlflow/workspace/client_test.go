@@ -37,16 +37,17 @@ func skipIfLive(t *testing.T, reason string) {
 func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 
-	var baseURL string
+	var baseURL, token string
 	if isLive() {
 		baseURL = os.Getenv("MLFLOW_TRACKING_URI")
+		token = os.Getenv("MLFLOW_TRACKING_TOKEN")
 	} else {
 		server := httptest.NewServer(handler)
 		t.Cleanup(server.Close)
 		baseURL = server.URL
 	}
 
-	tc, err := transport.New(transport.Config{BaseURL: baseURL})
+	tc, err := transport.New(transport.Config{BaseURL: baseURL, Token: token})
 	if err != nil {
 		t.Fatalf("transport.New() error = %v", err)
 	}
