@@ -74,10 +74,15 @@ func cleanupWorkspace(t *testing.T, client *Client, name string) {
 	})
 }
 
+// mustEncodeJSON writes v as JSON to w. It runs inside httptest handlers, which
+// execute on their own goroutines, so it uses t.Errorf rather than t.Fatalf:
+// FailNow (and thus t.Fatalf) must be called from the test goroutine, and off
+// it only exits the handler goroutine, letting the test race on against a
+// truncated response.
 func mustEncodeJSON(t *testing.T, w http.ResponseWriter, v any) {
 	t.Helper()
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		t.Fatalf("failed to encode response: %v", err)
+		t.Errorf("failed to encode response: %v", err)
 	}
 }
 
