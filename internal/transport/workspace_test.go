@@ -438,13 +438,15 @@ func TestWorkspaceRoundTripper_StripsCallerHeaderWhenNotAttached(t *testing.T) {
 }
 
 func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
-	var probeAuth, probeWS string
+	var probeAuth, probeWS, probeAccept, probeContentType string
 	var sawProbe bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			sawProbe = true
 			probeAuth = r.Header.Get("Authorization")
 			probeWS = r.Header.Get("X-MLFLOW-WORKSPACE")
+			probeAccept = r.Header.Get("Accept")
+			probeContentType = r.Header.Get("Content-Type")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
 			return
@@ -468,6 +470,10 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer token123")
 	// A caller-supplied workspace header must never be forwarded to the probe.
 	req.Header.Set("X-MLFLOW-WORKSPACE", "caller-value")
+	// Entity headers and a non-JSON Accept from the triggering request must not
+	// bleed onto the body-less JSON probe.
+	req.Header.Set("Accept", "text/csv")
+	req.Header.Set("Content-Type", "application/x-protobuf")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -483,6 +489,12 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	}
 	if probeWS != "" {
 		t.Errorf("probe must not carry workspace header, got %q", probeWS)
+	}
+	if probeAccept != "application/json" {
+		t.Errorf("probe Accept = %q, want %q", probeAccept, "application/json")
+	}
+	if probeContentType != "" {
+		t.Errorf("probe must not carry entity Content-Type, got %q", probeContentType)
 	}
 	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.IsWorkspacesEnabled() {
 		t.Error("IsWorkspacesEnabled() = false after successful probe, want true")

@@ -152,13 +152,22 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 	if err != nil {
 		return false, false, fmt.Errorf("build probe request: %w", err)
 	}
-	req.Header.Set("Accept", "application/json")
+	// Forward the triggering request's headers (e.g. Authorization, Cookie) so
+	// the probe is authenticated, but skip the workspace header and any
+	// entity/body headers that don't apply to this body-less GET. Accept is set
+	// last so it always wins over an inherited value.
 	for k, v := range original.Header {
-		if strings.EqualFold(k, workspaceHeader) {
+		switch {
+		case strings.EqualFold(k, workspaceHeader),
+			strings.EqualFold(k, "Content-Type"),
+			strings.EqualFold(k, "Content-Length"),
+			strings.EqualFold(k, "Transfer-Encoding"),
+			strings.EqualFold(k, "Expect"):
 			continue
 		}
 		req.Header[k] = v
 	}
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := w.base.RoundTrip(req)
 	if err != nil {
