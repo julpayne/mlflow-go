@@ -29,17 +29,17 @@ type WorkspaceRoundTripper struct {
 	enabled atomic.Bool
 }
 
-// WorkspaceRTConfig configures a WorkspaceRoundTripper.
-type WorkspaceRTConfig struct {
+// workspaceRTConfig configures a WorkspaceRoundTripper.
+type workspaceRTConfig struct {
 	Base         http.RoundTripper
 	Workspace    string
 	ProbeEnabled bool
 	BaseURL      string
 }
 
-// NewWorkspaceRoundTripper creates a round-tripper that conditionally
+// newWorkspaceRoundTripper creates a round-tripper that conditionally
 // attaches the workspace header.
-func NewWorkspaceRoundTripper(cfg WorkspaceRTConfig) http.RoundTripper {
+func newWorkspaceRoundTripper(cfg workspaceRTConfig) http.RoundTripper {
 	return &WorkspaceRoundTripper{
 		base:         cfg.Base,
 		workspace:    cfg.Workspace,
@@ -201,16 +201,16 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 	return info.WorkspacesEnabled, true, nil
 }
 
-// IsWorkspacesEnabled returns whether the probe detected workspaces support.
+// isWorkspacesEnabled returns whether the probe detected workspaces support.
 // Returns false if probing has not yet occurred or if probing is disabled.
-func (w *WorkspaceRoundTripper) IsWorkspacesEnabled() bool {
+func (w *WorkspaceRoundTripper) isWorkspacesEnabled() bool {
 	return w.enabled.Load()
 }
 
-// ForceProbe triggers the workspace probe immediately, using the configured
+// forceProbe triggers the workspace probe immediately, using the configured
 // base URL to construct the probe request. It returns any inconclusive probe
 // error. This is useful for testing.
-func (w *WorkspaceRoundTripper) ForceProbe() error {
+func (w *WorkspaceRoundTripper) forceProbe() error {
 	req, err := http.NewRequest(http.MethodGet, w.baseURL+"/", nil) //nolint:noctx // probe helper
 	if err != nil {
 		return err
@@ -219,10 +219,10 @@ func (w *WorkspaceRoundTripper) ForceProbe() error {
 	return err
 }
 
-// WrapClientWithWorkspace returns a shallow copy of the HTTP client with
+// wrapClientWithWorkspace returns a shallow copy of the HTTP client with
 // the workspace round-tripper installed, or the original client if no
 // workspace is configured.
-func WrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool) *http.Client {
+func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool) *http.Client {
 	if workspace == "" {
 		return c
 	}
@@ -231,7 +231,7 @@ func WrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEna
 		base = http.DefaultTransport
 	}
 	clone := *c
-	clone.Transport = NewWorkspaceRoundTripper(WorkspaceRTConfig{
+	clone.Transport = newWorkspaceRoundTripper(workspaceRTConfig{
 		Base:         base,
 		Workspace:    workspace,
 		ProbeEnabled: probeEnabled,
@@ -240,9 +240,9 @@ func WrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEna
 	return &clone
 }
 
-// ExtractWorkspaceRT returns the *WorkspaceRoundTripper from the given
+// extractWorkspaceRT returns the *WorkspaceRoundTripper from the given
 // http.Client's transport chain, if present. Returns nil otherwise.
-func ExtractWorkspaceRT(c *http.Client) *WorkspaceRoundTripper {
+func extractWorkspaceRT(c *http.Client) *WorkspaceRoundTripper {
 	if c == nil || c.Transport == nil {
 		return nil
 	}
@@ -250,23 +250,4 @@ func ExtractWorkspaceRT(c *http.Client) *WorkspaceRoundTripper {
 		return wrt
 	}
 	return nil
-}
-
-// EnsureWorkspaceHeader sets the X-MLFLOW-WORKSPACE header on the client's
-// static headers map if workspace probing is not enabled. This is used as
-// a fallback for clients that do not use the round-tripper approach.
-func EnsureWorkspaceHeader(headers map[string]string, workspace string) map[string]string {
-	if workspace == "" {
-		return headers
-	}
-	if headers == nil {
-		headers = make(map[string]string)
-	}
-	headers[workspaceHeader] = workspace
-	return headers
-}
-
-// WorkspaceHeaderValue is exported for callers that need the canonical header name.
-func WorkspaceHeaderValue() string {
-	return workspaceHeader
 }

@@ -553,10 +553,6 @@ func wrapClientWithAuth(c *http.Client, token, tokenPath string, trackingURL *ur
 	return &clone
 }
 
-func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool) *http.Client {
-	return WrapClientWithWorkspace(c, workspace, baseURL, probeEnabled)
-}
-
 func (c *Client) parseError(statusCode int, body []byte) error {
 	var errResp errorResponse
 	if err := json.Unmarshal(body, &errResp); err != nil {

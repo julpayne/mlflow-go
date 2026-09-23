@@ -25,7 +25,7 @@ func TestWorkspaceRoundTripper_AlwaysAttach(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "my-workspace",
 			ProbeEnabled: false,
@@ -53,7 +53,7 @@ func TestWorkspaceRoundTripper_EmptyWorkspace(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "",
 			ProbeEnabled: false,
@@ -86,7 +86,7 @@ func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOn(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "probe-ws",
 			ProbeEnabled: true,
@@ -130,7 +130,7 @@ func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOff(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "my-ws",
 			ProbeEnabled: true,
@@ -168,7 +168,7 @@ func TestWorkspaceRoundTripper_ProbeNotFound_CachedDefinitive(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "ws",
 			ProbeEnabled: true,
@@ -216,7 +216,7 @@ func TestWorkspaceRoundTripper_TransientProbeFailure_Retries(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "ws",
 			ProbeEnabled: true,
@@ -266,7 +266,7 @@ func TestWorkspaceRoundTripper_ProbeCached(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "cached-ws",
 			ProbeEnabled: true,
@@ -300,7 +300,7 @@ func TestWorkspaceRoundTripper_ProbeFailure_ReturnsError(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "fail-ws",
 			ProbeEnabled: true,
@@ -336,7 +336,7 @@ func TestWorkspaceRoundTripper_CrossOriginRedirect(t *testing.T) {
 	defer origin.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "my-workspace",
 			ProbeEnabled: false,
@@ -411,7 +411,7 @@ func TestWorkspaceRoundTripper_StripsCallerHeaderWhenNotAttached(t *testing.T) {
 
 	// Cross-origin request: attachment is not allowed, so a caller-supplied
 	// workspace header must be stripped rather than leaked.
-	rt := NewWorkspaceRoundTripper(WorkspaceRTConfig{
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
 		Base:      base,
 		Workspace: "ws",
 		BaseURL:   "https://mlflow.example.com",
@@ -455,7 +455,7 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rt := NewWorkspaceRoundTripper(WorkspaceRTConfig{
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
 		Base:         http.DefaultTransport,
 		Workspace:    "ws",
 		ProbeEnabled: true,
@@ -496,8 +496,8 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	if probeContentType != "" {
 		t.Errorf("probe must not carry entity Content-Type, got %q", probeContentType)
 	}
-	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.IsWorkspacesEnabled() {
-		t.Error("IsWorkspacesEnabled() = false after successful probe, want true")
+	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.isWorkspacesEnabled() {
+		t.Error("isWorkspacesEnabled() = false after successful probe, want true")
 	}
 }
 
@@ -515,7 +515,7 @@ func TestWorkspaceRoundTripper_ProbeMalformedJSON_ReturnsError(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{
-		Transport: NewWorkspaceRoundTripper(WorkspaceRTConfig{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
 			Base:         http.DefaultTransport,
 			Workspace:    "ws",
 			ProbeEnabled: true,
@@ -547,7 +547,7 @@ func TestWorkspaceRoundTripper_ProbeNetworkError_ReturnsError(t *testing.T) {
 		}, nil
 	})
 
-	rt := NewWorkspaceRoundTripper(WorkspaceRTConfig{
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
 		Base:         base,
 		Workspace:    "ws",
 		ProbeEnabled: true,
@@ -579,7 +579,7 @@ func TestWorkspaceRoundTripper_ForceProbe(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rt := NewWorkspaceRoundTripper(WorkspaceRTConfig{
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
 		Base:         http.DefaultTransport,
 		Workspace:    "ws",
 		ProbeEnabled: true,
@@ -590,70 +590,46 @@ func TestWorkspaceRoundTripper_ForceProbe(t *testing.T) {
 		t.Fatal("unexpected round-tripper type")
 	}
 
-	if wrt.IsWorkspacesEnabled() {
-		t.Error("IsWorkspacesEnabled() = true before probe, want false")
+	if wrt.isWorkspacesEnabled() {
+		t.Error("isWorkspacesEnabled() = true before probe, want false")
 	}
-	if err := wrt.ForceProbe(); err != nil {
-		t.Fatalf("ForceProbe error: %v", err)
+	if err := wrt.forceProbe(); err != nil {
+		t.Fatalf("forceProbe error: %v", err)
 	}
-	if !wrt.IsWorkspacesEnabled() {
-		t.Error("IsWorkspacesEnabled() = false after ForceProbe, want true")
+	if !wrt.isWorkspacesEnabled() {
+		t.Error("isWorkspacesEnabled() = false after forceProbe, want true")
 	}
 }
 
 func TestExtractWorkspaceRT(t *testing.T) {
-	if got := ExtractWorkspaceRT(nil); got != nil {
-		t.Error("ExtractWorkspaceRT(nil) != nil")
+	if got := extractWorkspaceRT(nil); got != nil {
+		t.Error("extractWorkspaceRT(nil) != nil")
 	}
-	if got := ExtractWorkspaceRT(&http.Client{}); got != nil {
+	if got := extractWorkspaceRT(&http.Client{}); got != nil {
 		t.Error("expected nil for client with no transport")
 	}
-	if got := ExtractWorkspaceRT(&http.Client{Transport: http.DefaultTransport}); got != nil {
+	if got := extractWorkspaceRT(&http.Client{Transport: http.DefaultTransport}); got != nil {
 		t.Error("expected nil for non-workspace transport")
 	}
 
-	rt := NewWorkspaceRoundTripper(WorkspaceRTConfig{
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
 		Base:      http.DefaultTransport,
 		Workspace: "ws",
 		BaseURL:   "http://mlflow.example.com",
 	})
-	if got := ExtractWorkspaceRT(&http.Client{Transport: rt}); got == nil {
+	if got := extractWorkspaceRT(&http.Client{Transport: rt}); got == nil {
 		t.Error("expected to extract WorkspaceRoundTripper")
-	}
-
-	if WorkspaceHeaderValue() != "X-MLFLOW-WORKSPACE" {
-		t.Errorf("WorkspaceHeaderValue() = %q, want %q", WorkspaceHeaderValue(), "X-MLFLOW-WORKSPACE")
-	}
-}
-
-func TestEnsureWorkspaceHeader(t *testing.T) {
-	if got := EnsureWorkspaceHeader(nil, ""); got != nil {
-		t.Errorf("empty workspace: got %v, want nil", got)
-	}
-
-	got := EnsureWorkspaceHeader(nil, "ws")
-	if got["X-MLFLOW-WORKSPACE"] != "ws" {
-		t.Errorf("nil map: header = %q, want %q", got["X-MLFLOW-WORKSPACE"], "ws")
-	}
-
-	in := map[string]string{"Authorization": "Bearer t"}
-	got = EnsureWorkspaceHeader(in, "ws2")
-	if got["Authorization"] != "Bearer t" {
-		t.Errorf("existing header dropped: %v", got)
-	}
-	if got["X-MLFLOW-WORKSPACE"] != "ws2" {
-		t.Errorf("workspace header = %q, want %q", got["X-MLFLOW-WORKSPACE"], "ws2")
 	}
 }
 
 func TestWrapClientWithWorkspace_InstallsRoundTripper(t *testing.T) {
 	original := &http.Client{}
-	wrapped := WrapClientWithWorkspace(original, "ws", "http://mlflow.example.com", false)
+	wrapped := wrapClientWithWorkspace(original, "ws", "http://mlflow.example.com", false)
 	if wrapped == original {
 		t.Fatal("expected a new client when workspace is set")
 	}
 
-	rt := ExtractWorkspaceRT(wrapped)
+	rt := extractWorkspaceRT(wrapped)
 	if rt == nil {
 		t.Fatal("expected WorkspaceRoundTripper to be installed")
 	}
@@ -665,7 +641,7 @@ func TestWrapClientWithWorkspace_InstallsRoundTripper(t *testing.T) {
 
 func TestWrapClientWithWorkspace_NoWorkspace(t *testing.T) {
 	original := &http.Client{}
-	result := WrapClientWithWorkspace(original, "", "http://localhost", false)
+	result := wrapClientWithWorkspace(original, "", "http://localhost", false)
 	if result != original {
 		t.Error("expected same client when workspace is empty")
 	}
