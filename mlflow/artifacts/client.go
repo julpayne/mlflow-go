@@ -5,13 +5,21 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"reflect"
+	"strings"
 
 	"github.com/opendatahub-io/mlflow-go/internal/artifact"
 	"github.com/opendatahub-io/mlflow-go/internal/gen/mlflowpb"
 	"github.com/opendatahub-io/mlflow-go/internal/transport"
 )
 
-const maxArtifactUploadSize = 100 << 20 // 100 MiB
+const (
+	maxArtifactUploadSize = 100 << 20 // 100 MiB
+
+	// artifactProxyPrefix is the mlflow-artifacts proxy endpoint prefix for
+	// path-based artifact upload/download.
+	artifactProxyPrefix = "/api/2.0/mlflow-artifacts/artifacts/"
+)
 
 // Client provides access to MLflow run artifacts.
 // It is safe for concurrent use.
@@ -64,7 +72,7 @@ func (c *Client) LogArtifact(ctx context.Context, runID, artifactPath string, r 
 	if artifactPath == "" {
 		return fmt.Errorf("mlflow: artifact path is required")
 	}
-	if r == nil {
+	if isNilReader(r) {
 		return fmt.Errorf("mlflow: artifact reader is required")
 	}
 
@@ -130,14 +138,19 @@ func (c *Client) DownloadArtifact(ctx context.Context, runID, artifactPath strin
 	return rc, nil
 }
 
-// UploadArtifact uploads an artifact to the mlflow-artifacts proxy using an
-// absolute storage path (no run ID required).
+// UploadArtifact uploads an artifact to the mlflow-artifacts proxy using a
+// storage path (no run ID required).
 // Uses PUT /api/2.0/mlflow-artifacts/artifacts/{artifactPath}.
+//
+// The artifact is streamed from r with no size cap and without being buffered in
+// memory, so arbitrarily large objects can be uploaded. A leading slash on
+// artifactPath is trimmed so that both "foo/bar" and "/foo/bar" address the same
+// object.
 func (c *Client) UploadArtifact(ctx context.Context, artifactPath string, r io.Reader, opts ...UploadArtifactOption) error {
 	if artifactPath == "" {
 		return fmt.Errorf("mlflow: artifact path is required")
 	}
-	if r == nil {
+	if isNilReader(r) {
 		return fmt.Errorf("mlflow: artifact reader is required")
 	}
 
@@ -146,38 +159,59 @@ func (c *Client) UploadArtifact(ctx context.Context, artifactPath string, r io.R
 		opt(o)
 	}
 
-	content, err := readArtifactContent(r, maxArtifactUploadSize)
-	if err != nil {
-		return err
-	}
-
 	contentType := o.contentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	path := "/api/2.0/mlflow-artifacts/artifacts/" + artifactPath
-	if err := c.transport.PutBytes(ctx, path, content, contentType); err != nil {
+	if err := c.transport.PutReader(ctx, proxyArtifactPath(artifactPath), r, contentType); err != nil {
 		return fmt.Errorf("failed to upload artifact: %w", err)
 	}
 	return nil
 }
 
 // DownloadArtifactByPath downloads an artifact from the mlflow-artifacts proxy
-// using an absolute storage path (no run ID required).
+// using a storage path (no run ID required).
 // Uses GET /api/2.0/mlflow-artifacts/artifacts/{artifactPath}.
 // The caller must close the returned ReadCloser.
+//
+// The artifact is streamed with no size cap, so arbitrarily large objects can be
+// read incrementally. A leading slash on artifactPath is trimmed so that both
+// "foo/bar" and "/foo/bar" address the same object.
 func (c *Client) DownloadArtifactByPath(ctx context.Context, artifactPath string) (io.ReadCloser, error) {
 	if artifactPath == "" {
 		return nil, fmt.Errorf("mlflow: artifact path is required")
 	}
 
-	path := "/api/2.0/mlflow-artifacts/artifacts/" + artifactPath
-	rc, err := c.transport.GetBody(ctx, path, nil)
+	rc, err := c.transport.GetBodyStream(ctx, proxyArtifactPath(artifactPath), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact: %w", err)
 	}
 	return rc, nil
+}
+
+// proxyArtifactPath builds the mlflow-artifacts proxy request path for a storage
+// path. A leading slash is trimmed so an "absolute" path does not produce a
+// doubled slash after the prefix, which some artifact backends reject or resolve
+// to a different key.
+func proxyArtifactPath(artifactPath string) string {
+	return artifactProxyPrefix + strings.TrimPrefix(artifactPath, "/")
+}
+
+// isNilReader reports whether r is either an untyped nil interface or a typed
+// nil pointer/interface value. The plain r == nil check misses a typed nil
+// (e.g. a (*bytes.Buffer)(nil) stored in an io.Reader), which would otherwise
+// panic when read.
+func isNilReader(r io.Reader) bool {
+	if r == nil {
+		return true
+	}
+	switch v := reflect.ValueOf(r); v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 func readArtifactContent(r io.Reader, maxSize int64) ([]byte, error) {

@@ -137,15 +137,78 @@ func (c *Client) GetBytes(ctx context.Context, path string, query url.Values) ([
 }
 
 // GetBody performs a GET request and returns the response body for streaming.
-// The caller must close the returned ReadCloser.
+// The returned stream is capped at maxResponseBodySize. The caller must close
+// the returned ReadCloser.
 func (c *Client) GetBody(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
-	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false)
+	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false, true)
+}
+
+// GetBodyStream performs a GET request and returns the response body for
+// streaming without capping the response size. Use this for artifact downloads,
+// where the body is an arbitrarily large object stream the caller consumes
+// incrementally rather than a buffered API response. The caller must close the
+// returned ReadCloser.
+func (c *Client) GetBodyStream(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
+	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false, false)
 }
 
 // PutBytes performs a PUT request with a raw body and content type.
 func (c *Client) PutBytes(ctx context.Context, path string, body []byte, contentType string) error {
 	_, _, err := c.doRaw(ctx, http.MethodPut, path, nil, body, contentType, false)
 	return err
+}
+
+// PutReader performs a PUT request that streams body as the request payload
+// without buffering it in memory, so arbitrarily large artifacts can be
+// uploaded. When body's length is not known ahead of time (e.g. an *os.File or a
+// plain io.Reader) the request uses chunked transfer encoding. The caller
+// retains ownership of body and is responsible for closing it if needed.
+func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, contentType string) error {
+	reqURL := c.buildURL(path, nil)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL.String(), body)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	start := time.Now()
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", http.MethodPut,
+			"url", reqURL.String(),
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if c.logger != nil {
+		c.logger.Debug("response",
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+
+	// The response to a PUT is small (status/metadata); read it fully so the
+	// connection can be reused and any error body can be surfaced.
+	respBody, err := readResponseBody(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return c.parseError(resp.StatusCode, respBody)
+	}
+	return nil
 }
 
 // PostBytes performs a POST request with a raw body and content type.
@@ -342,7 +405,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	return respBody, resp.Header.Get("Content-Type"), nil
 }
 
-func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) (io.ReadCloser, error) {
+func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept, capResponse bool) (io.ReadCloser, error) {
 	reqURL := c.buildURL(path, query)
 
 	var bodyReader io.Reader
@@ -372,7 +435,7 @@ func (c *Client) doRawBody(ctx context.Context, method, path string, query url.V
 		)
 	}
 
-	return c.doRequestBody(req)
+	return c.doRequestBody(req, capResponse)
 }
 
 func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string, headers map[string]string) (io.ReadCloser, error) {
@@ -392,10 +455,12 @@ func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string,
 		)
 	}
 
-	return c.doRequestBody(req)
+	// Absolute GETs are presigned artifact downloads: arbitrarily large object
+	// streams the caller consumes incrementally, so they are not size-capped.
+	return c.doRequestBody(req, false)
 }
 
-func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
+func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadCloser, error) {
 	start := time.Now()
 
 	resp, err := c.httpClient.Do(req)
@@ -419,6 +484,9 @@ func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
 		return nil, c.parseError(resp.StatusCode, respBody)
 	}
 
+	if !capResponse {
+		return resp.Body, nil
+	}
 	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
 }
 

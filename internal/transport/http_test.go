@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -622,6 +623,77 @@ func TestClient_GetBody_Success(t *testing.T) {
 	}
 }
 
+func TestClient_GetBodyStream_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		w.Write([]byte("stream-data"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/file", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(data) != "stream-data" {
+		t.Errorf("data = %q, want stream-data", string(data))
+	}
+}
+
+// TestClient_GetBodyStream_ExceedsMaxResponseBodySize verifies that the
+// streaming download variant is not subject to the maxResponseBodySize cap that
+// GetBody enforces, so arbitrarily large artifacts can be read in full.
+func TestClient_GetBodyStream_ExceedsMaxResponseBodySize(t *testing.T) {
+	const bodySize = maxResponseBodySize + 1
+	chunk := bytes.Repeat([]byte("a"), 1<<20) // 1 MiB
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remaining := int64(bodySize)
+		for remaining > 0 {
+			n := int64(len(chunk))
+			if n > remaining {
+				n = remaining
+			}
+			if _, err := w.Write(chunk[:n]); err != nil {
+				return
+			}
+			remaining -= n
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/big", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v", err)
+	}
+	defer rc.Close()
+
+	n, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		t.Fatalf("io.Copy() error = %v, want nil (stream must not be capped)", err)
+	}
+	if n != bodySize {
+		t.Errorf("read %d bytes, want %d", n, int64(bodySize))
+	}
+}
+
 func TestClient_PutBytes_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
@@ -646,6 +718,67 @@ func TestClient_PutBytes_Success(t *testing.T) {
 	err = client.PutBytes(context.Background(), "/api/artifacts/file", []byte("upload-data"), "application/octet-stream")
 	if err != nil {
 		t.Fatalf("PutBytes() error = %v", err)
+	}
+}
+
+func TestClient_PutReader_StreamsBody(t *testing.T) {
+	var receivedBody string
+	var receivedCT string
+	var contentLength int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		receivedCT = r.Header.Get("Content-Type")
+		contentLength = r.ContentLength
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// A pipe reader has no known length, so the request must stream via chunked
+	// transfer encoding (ContentLength == -1 server-side).
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("streamed-upload"))
+		pw.Close()
+	}()
+
+	err = client.PutReader(context.Background(), "/api/artifacts/file", pr, "application/octet-stream")
+	if err != nil {
+		t.Fatalf("PutReader() error = %v", err)
+	}
+	if receivedBody != "streamed-upload" {
+		t.Errorf("body = %q, want streamed-upload", receivedBody)
+	}
+	if receivedCT != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", receivedCT)
+	}
+	if contentLength != -1 {
+		t.Errorf("ContentLength = %d, want -1 (chunked stream)", contentLength)
+	}
+}
+
+func TestClient_PutReader_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+	if err == nil {
+		t.Fatal("expected error from server 500")
 	}
 }
 
