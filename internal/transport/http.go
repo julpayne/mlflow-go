@@ -24,11 +24,13 @@ type Client struct {
 	headers    map[string]string
 	httpClient *http.Client // API calls; overall http.Client.Timeout applies
 	// streamClient handles artifact uploads/downloads. It shares httpClient's
-	// Transport (connection pool, dial/TLS/response-header timeouts, auth and
+	// Transport (connection pool, dial and TLS handshake timeouts, auth and
 	// workspace round-trippers) but drops the overall http.Client.Timeout, which
 	// covers the entire exchange including body transfer and would otherwise abort
 	// an arbitrarily large streaming upload/download mid-transfer. Streaming
-	// transfers are bounded by the request context instead.
+	// transfers are bounded by the request context instead; the response-header
+	// phase is separately bounded in doRequestBody (the shared Transport may set
+	// no ResponseHeaderTimeout).
 	streamClient *http.Client
 	logger       *slog.Logger
 }
@@ -501,11 +503,33 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 	// the timeout-free stream client so a large transfer is not aborted by the
 	// overall http.Client.Timeout. Bounded reads keep the capped API client.
 	client := c.httpClient
+	// headerCancel bounds the response-header phase of a streaming request. The
+	// stream client has no overall Timeout and its shared Transport may set no
+	// ResponseHeaderTimeout (e.g. http.DefaultTransport), so without this a server
+	// that accepts the connection but never sends headers would block forever.
+	// The timer fires cancel if headers do not arrive within httpClient.Timeout;
+	// once headers arrive we stop the timer and hand cancel to the body's Close so
+	// the transfer itself stays bound only by the caller's context.
+	var headerCancel context.CancelFunc
+	var headerTimer *time.Timer
 	if !capResponse {
 		client = c.streamClient
+		if t := c.httpClient.Timeout; t > 0 {
+			var ctx context.Context
+			ctx, headerCancel = context.WithCancel(req.Context())
+			req = req.WithContext(ctx)
+			headerTimer = time.AfterFunc(t, headerCancel)
+		}
 	}
+
 	resp, err := client.Do(req)
+	if headerTimer != nil {
+		headerTimer.Stop()
+	}
 	if err != nil {
+		if headerCancel != nil {
+			headerCancel()
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
@@ -519,6 +543,9 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 	if resp.StatusCode >= 400 {
 		respBody, readErr := readResponseBody(resp.Body)
 		resp.Body.Close()
+		if headerCancel != nil {
+			headerCancel()
+		}
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -526,9 +553,27 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 	}
 
 	if !capResponse {
+		if headerCancel != nil {
+			// Keep the header-phase context alive for the duration of the stream;
+			// release it when the caller closes the body.
+			return &cancelReadCloser{ReadCloser: resp.Body, cancel: headerCancel}, nil
+		}
 		return resp.Body, nil
 	}
 	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
+}
+
+// cancelReadCloser wraps a response body and runs cancel when the body is closed,
+// releasing a context created to bound the request's response-header phase.
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {

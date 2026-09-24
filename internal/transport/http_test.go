@@ -751,6 +751,39 @@ func TestClient_GetBodyStream_NotBoundByOverallTimeout(t *testing.T) {
 	}
 }
 
+// TestClient_GetBodyStream_HeaderPhaseBounded verifies that a streaming download
+// does not block forever when the server accepts the connection but never sends
+// response headers: the response-header phase is bounded by httpClient.Timeout
+// even with a context that has no deadline.
+func TestClient_GetBodyStream_HeaderPhaseBounded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the request open without sending headers
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, gerr := client.GetBodyStream(context.Background(), "/api/artifacts/no-headers", nil)
+		done <- gerr
+	}()
+
+	select {
+	case gerr := <-done:
+		if gerr == nil {
+			t.Fatal("expected error when headers do not arrive within the deadline")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetBodyStream blocked past the header deadline")
+	}
+}
+
 // TestClient_GetBody_BoundByOverallTimeout is the counterpart: the capped
 // (buffered) download path still enforces the overall http.Client.Timeout.
 func TestClient_GetBody_BoundByOverallTimeout(t *testing.T) {
