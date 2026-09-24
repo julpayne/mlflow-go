@@ -207,8 +207,16 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 
 	// Stream the (potentially very large) body with the timeout-free client so a
 	// slow upload is not aborted by the overall http.Client.Timeout; the transfer
-	// is bounded by ctx via the request instead.
-	resp, err := c.streamClient.Do(req)
+	// is bounded by ctx via the request instead. Redirect following is disabled:
+	// Go turns 301/302/303 into a bodyless GET (and cannot replay a streamed body
+	// for 307/308), so a followed redirect could return 200 while the server
+	// stored nothing. Returning the 3xx verbatim lets the non-2xx check below
+	// surface it as a failure.
+	uploadClient := *c.streamClient
+	uploadClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := uploadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}

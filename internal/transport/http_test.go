@@ -874,29 +874,50 @@ func TestClient_PutReader_StreamsBody(t *testing.T) {
 }
 
 // TestClient_PutReader_RedirectIsError verifies that a 3xx response is treated
-// as a failure. A streamed body has no req.GetBody, so Go's client cannot replay
-// it across a redirect and returns the 3xx verbatim; accepting it would report a
-// stored-nothing upload as success.
+// as a failure even when a Location header is present. Go would otherwise follow
+// a 301/302/303 as a bodyless GET; if that GET returns 200 the upload would be
+// reported as success while the server stored nothing.
 func TestClient_PutReader_RedirectIsError(t *testing.T) {
-	var putCount int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		putCount++
-		// No Location header, so the client cannot follow and returns the 3xx.
-		w.WriteHeader(http.StatusTemporaryRedirect)
-	}))
-	defer server.Close()
-
-	client, err := New(Config{BaseURL: server.URL})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+	cases := []struct {
+		name     string
+		status   int
+		location string
+	}{
+		{"307 no location", http.StatusTemporaryRedirect, ""},
+		{"302 with location", http.StatusFound, "/api/artifacts/moved"},
+		{"301 with location", http.StatusMovedPermanently, "/api/artifacts/moved"},
+		{"303 with location", http.StatusSeeOther, "/api/artifacts/moved"},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var redirectTarget string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/artifacts/moved" {
+					// The (wrongly) followed GET target: succeeds and stores nothing.
+					redirectTarget = r.Method
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
 
-	err = client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
-	if err == nil {
-		t.Fatal("expected error for 3xx redirect response, got nil")
-	}
-	if putCount != 1 {
-		t.Errorf("server received %d requests, want 1 (redirect not replayed)", putCount)
+			client, err := New(Config{BaseURL: server.URL})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			err = client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+			if err == nil {
+				t.Fatal("expected error for 3xx redirect response, got nil")
+			}
+			if redirectTarget != "" {
+				t.Errorf("redirect was followed (as %s); it must not be", redirectTarget)
+			}
+		})
 	}
 }
 
