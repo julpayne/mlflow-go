@@ -291,6 +291,23 @@ if err != nil {
 }
 ```
 
+#### Path-based artifacts (no run ID)
+
+`UploadArtifact` and `DownloadArtifactByPath` transfer an object addressed by a storage path directly through the mlflow-artifacts proxy (`PUT`/`GET /api/2.0/mlflow-artifacts/artifacts/{path}`), without a run ID. They are meant for large models and datasets: the object is streamed in both directions with no size cap and without buffering the whole thing in memory.
+
+```go
+// Upload by storage path (streamed, no size limit; caller keeps ownership of the reader)
+err := client.Artifacts().UploadArtifact(ctx, "experiments/1/model.bin",
+    reader, // any io.Reader (*os.File, *bytes.Reader, ...)
+    artifacts.WithUploadContentType("application/octet-stream"), // optional
+)
+
+// Download by storage path (caller must close the returned reader)
+rc, err := client.Artifacts().DownloadArtifactByPath(ctx, "experiments/1/model.bin")
+```
+
+Because these transfers can be arbitrarily large, they are **not** bounded by the client `WithTimeout`; bound them with a `context` deadline. When the context has no deadline, only the wait for response headers is bounded, by `mlflow.WithStreamHeaderTimeout` (default 5 minutes; a negative value disables the fallback).
+
 For local development, start MLflow with artifact serving enabled (`make dev/up` configures this automatically):
 
 ```bash
@@ -802,7 +819,7 @@ mlflow-go/
 │   │   ├── types.go            # Experiment, Run, Metric, Param types
 │   │   └── options.go          # Domain-specific options
 │   ├── artifacts/              # Artifacts sub-client
-│   │   ├── client.go           # ListArtifacts, LogArtifact, DownloadArtifact
+│   │   ├── client.go           # ListArtifacts, LogArtifact, DownloadArtifact, UploadArtifact, DownloadArtifactByPath
 │   │   ├── types.go            # FileInfo, ListArtifactsResult types
 │   │   └── options.go          # Domain-specific options
 │   ├── promptregistry/         # Prompt Registry sub-client
