@@ -629,11 +629,16 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 
 	resp, err := client.Do(req)
 	if err != nil {
-		if headerTimer != nil {
-			headerTimer.Stop()
-		}
+		// If the header timer fired it canceled the request context, so Do failed
+		// with context.Canceled. Stop reporting false then means the timer fired;
+		// surface it as a header timeout so the caller can tell it apart from its
+		// own cancellation, matching the success path and PutReader.
+		fired := headerTimer != nil && !headerTimer.Stop()
 		if headerCancel != nil {
 			headerCancel()
+		}
+		if fired {
+			return nil, fmt.Errorf("request failed: response headers not received within %s", headerTimeout)
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}

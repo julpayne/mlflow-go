@@ -782,6 +782,12 @@ func TestClient_GetBodyStream_HeaderPhaseBounded(t *testing.T) {
 		if gerr == nil {
 			t.Fatal("expected error when headers do not arrive within the deadline")
 		}
+		// The timer cancels the request context, so Do fails with
+		// context.Canceled; the error must be reported as a header timeout, not a
+		// bare cancellation, so the caller can tell it apart from its own.
+		if !strings.Contains(gerr.Error(), "response headers not received") {
+			t.Errorf("error = %v, want response-headers-not-received message", gerr)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("GetBodyStream blocked past the header deadline")
 	}
