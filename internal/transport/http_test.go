@@ -288,6 +288,27 @@ func TestNew_CustomTimeout(t *testing.T) {
 	}
 }
 
+func TestNew_StreamClientHasNoOverallTimeout(t *testing.T) {
+	// A token installs an auth round-tripper, giving both clients a non-nil
+	// Transport so the sharing check below is meaningful.
+	client, err := New(Config{BaseURL: "https://localhost", Timeout: 60 * time.Second, Token: "tok"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if client.httpClient.Timeout != 60*time.Second {
+		t.Errorf("httpClient.Timeout = %v, want 60s", client.httpClient.Timeout)
+	}
+	if client.streamClient.Timeout != 0 {
+		t.Errorf("streamClient.Timeout = %v, want 0", client.streamClient.Timeout)
+	}
+	// The stream client must share the API client's Transport so it keeps the
+	// connection pool, auth, workspace and connection-level timeouts.
+	if client.streamClient.Transport != client.httpClient.Transport {
+		t.Error("streamClient must share httpClient's Transport")
+	}
+}
+
 func TestClient_TimeoutExceeded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
@@ -691,6 +712,93 @@ func TestClient_GetBodyStream_ExceedsMaxResponseBodySize(t *testing.T) {
 	}
 	if n != bodySize {
 		t.Errorf("read %d bytes, want %d", n, int64(bodySize))
+	}
+}
+
+// TestClient_GetBodyStream_NotBoundByOverallTimeout verifies that a streaming
+// download is not aborted by the overall http.Client.Timeout, so a slow transfer
+// that outlasts the configured timeout still completes.
+func TestClient_GetBodyStream_NotBoundByOverallTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("ResponseWriter is not a Flusher")
+		}
+		w.Write([]byte("start"))
+		fl.Flush()
+		time.Sleep(250 * time.Millisecond) // outlasts the 50ms overall Timeout
+		w.Write([]byte("-end"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/slow", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v, want nil (stream must not be bound by overall timeout)", err)
+	}
+	if string(data) != "start-end" {
+		t.Errorf("data = %q, want start-end", string(data))
+	}
+}
+
+// TestClient_GetBody_BoundByOverallTimeout is the counterpart: the capped
+// (buffered) download path still enforces the overall http.Client.Timeout.
+func TestClient_GetBody_BoundByOverallTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("ResponseWriter is not a Flusher")
+		}
+		w.Write([]byte("start"))
+		fl.Flush()
+		time.Sleep(250 * time.Millisecond)
+		w.Write([]byte("-end"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBody(context.Background(), "/api/artifacts/slow", nil)
+	if err == nil {
+		_, err = io.ReadAll(rc)
+		rc.Close()
+	}
+	if err == nil {
+		t.Fatal("expected timeout error on capped GetBody, got nil")
+	}
+}
+
+// TestClient_PutReader_NotBoundByOverallTimeout verifies that a streaming upload
+// is not aborted by the overall http.Client.Timeout.
+func TestClient_PutReader_NotBoundByOverallTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(250 * time.Millisecond) // outlasts the 50ms overall Timeout
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutReader(context.Background(), "/api/artifacts/slow", strings.NewReader("data"), "text/plain")
+	if err != nil {
+		t.Fatalf("PutReader() error = %v, want nil (upload must not be bound by overall timeout)", err)
 	}
 }
 

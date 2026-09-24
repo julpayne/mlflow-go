@@ -22,8 +22,15 @@ const maxResponseBodySize = 100 << 20 // 100 MiB
 type Client struct {
 	baseURL    *url.URL
 	headers    map[string]string
-	httpClient *http.Client
-	logger     *slog.Logger
+	httpClient *http.Client // API calls; overall http.Client.Timeout applies
+	// streamClient handles artifact uploads/downloads. It shares httpClient's
+	// Transport (connection pool, dial/TLS/response-header timeouts, auth and
+	// workspace round-trippers) but drops the overall http.Client.Timeout, which
+	// covers the entire exchange including body transfer and would otherwise abort
+	// an arbitrarily large streaming upload/download mid-transfer. Streaming
+	// transfers are bounded by the request context instead.
+	streamClient *http.Client
+	logger       *slog.Logger
 }
 
 // Config holds configuration for creating a transport Client.
@@ -80,11 +87,21 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
+	wrapped := wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport)
+
+	// Derive the streaming client from wrapped so it shares the same Transport
+	// (and thus connection pool, dial/TLS/response-header timeouts, and the auth
+	// and workspace round-trippers), but without the overall Timeout that would
+	// cap the duration of a large artifact transfer.
+	streamClient := *wrapped
+	streamClient.Timeout = 0
+
 	return &Client{
-		baseURL:    baseURL,
-		headers:    cfg.Headers,
-		httpClient: wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport),
-		logger:     cfg.Logger,
+		baseURL:      baseURL,
+		headers:      cfg.Headers,
+		httpClient:   wrapped,
+		streamClient: &streamClient,
+		logger:       cfg.Logger,
 	}, nil
 }
 
@@ -146,7 +163,8 @@ func (c *Client) GetBody(ctx context.Context, path string, query url.Values) (io
 // GetBodyStream performs a GET request and returns the response body for
 // streaming without capping the response size. Use this for artifact downloads,
 // where the body is an arbitrarily large object stream the caller consumes
-// incrementally rather than a buffered API response. The caller must close the
+// incrementally rather than a buffered API response. The transfer is not subject
+// to the overall http.Client.Timeout; bound it via ctx. The caller must close the
 // returned ReadCloser.
 func (c *Client) GetBodyStream(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
 	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false, false)
@@ -161,7 +179,8 @@ func (c *Client) PutBytes(ctx context.Context, path string, body []byte, content
 // PutReader performs a PUT request that streams body as the request payload
 // without buffering it in memory, so arbitrarily large artifacts can be
 // uploaded. When body's length is not known ahead of time (e.g. an *os.File or a
-// plain io.Reader) the request uses chunked transfer encoding. The caller
+// plain io.Reader) the request uses chunked transfer encoding. The upload is not
+// subject to the overall http.Client.Timeout; bound it via ctx. The caller
 // retains ownership of body and is responsible for closing it if needed.
 func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, contentType string) error {
 	reqURL := c.buildURL(path, nil)
@@ -186,7 +205,10 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 		)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	// Stream the (potentially very large) body with the timeout-free client so a
+	// slow upload is not aborted by the overall http.Client.Timeout; the transfer
+	// is bounded by ctx via the request instead.
+	resp, err := c.streamClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -467,7 +489,14 @@ func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string,
 func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadCloser, error) {
 	start := time.Now()
 
-	resp, err := c.httpClient.Do(req)
+	// Uncapped bodies are artifact streams read incrementally by the caller; use
+	// the timeout-free stream client so a large transfer is not aborted by the
+	// overall http.Client.Timeout. Bounded reads keep the capped API client.
+	client := c.httpClient
+	if !capResponse {
+		client = c.streamClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
