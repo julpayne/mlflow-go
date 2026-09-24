@@ -156,6 +156,65 @@ func TestWorkspaceRoundTripper_AttachesToNonManagement(t *testing.T) {
 	}
 }
 
+// TestWorkspaceRoundTripper_SkipsServerInfo verifies that a direct call to the
+// server-info endpoint (e.g. workspace.Client.GetServerInfo) never carries the
+// workspace header — the endpoint is workspace-agnostic, and attaching a header
+// naming a possibly-disabled or not-yet-created workspace would provoke the very
+// FEATURE_DISABLED / RESOURCE_DOES_NOT_EXIST errors GetServerInfo is used to
+// detect. With probing enabled the direct call must also not trigger a separate
+// probe request.
+func TestWorkspaceRoundTripper_SkipsServerInfo(t *testing.T) {
+	tests := []struct {
+		name         string
+		probeEnabled bool
+	}{
+		{"probe disabled", false},
+		{"probe enabled", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hits int
+			var receivedHeader string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/3.0/mlflow/server-info" {
+					hits++
+					receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+					return
+				}
+				t.Errorf("unexpected request to %s", r.URL.Path)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			client := &http.Client{
+				Transport: newWorkspaceRoundTripper(workspaceRTConfig{
+					Base:         http.DefaultTransport,
+					Workspace:    "team-x",
+					ProbeEnabled: tt.probeEnabled,
+					BaseURL:      server.URL,
+				}),
+			}
+
+			resp, err := client.Get(server.URL + "/api/3.0/mlflow/server-info")
+			if err != nil {
+				t.Fatalf("request error: %v", err)
+			}
+			resp.Body.Close()
+
+			// Exactly the one direct call: the exemption is checked before the
+			// probe, so no extra probe request is made.
+			if hits != 1 {
+				t.Errorf("server-info hits = %d, want 1", hits)
+			}
+			if receivedHeader != "" {
+				t.Errorf("X-MLFLOW-WORKSPACE = %q, want none for server-info endpoint", receivedHeader)
+			}
+		})
+	}
+}
+
 func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOn(t *testing.T) {
 	var apiHeaders []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

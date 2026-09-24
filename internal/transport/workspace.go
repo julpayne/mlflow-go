@@ -19,6 +19,15 @@ const workspaceHeader = "X-MLFLOW-WORKSPACE"
 // shouldAttach for why sending the header here breaks workspace creation.
 const workspaceMgmtPath = "/api/3.0/mlflow/workspaces"
 
+// serverInfoPath reports server feature flags and is workspace-agnostic: the
+// header names a workspace the endpoint does not act on. Attaching it there is
+// counterproductive — on MLflow 3.13+ with workspaces disabled the server
+// answers with FEATURE_DISABLED, which is the very error a caller runs
+// GetServerInfo to detect, and when probing against a not-yet-created workspace
+// the server rejects the unresolved header with RESOURCE_DOES_NOT_EXIST. The
+// probe omits the header for the same reason.
+const serverInfoPath = "/api/3.0/mlflow/server-info"
+
 // WorkspaceRoundTripper conditionally attaches the X-MLFLOW-WORKSPACE header.
 // When probeEnabled is true, the first request triggers a probe to
 // GET /api/3.0/mlflow/server-info to check if workspaces are enabled;
@@ -90,13 +99,14 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) (bool, error) {
 	if w.workspace == "" {
 		return false, nil
 	}
-	// Never attach the header to workspace-management calls. The server resolves
-	// the header's workspace before running the handler, so creating workspace X
-	// through a client configured for X would fail with RESOURCE_DOES_NOT_EXIST
-	// before the create handler is reached (and get/delete already name the target
-	// in the URL). Checking this before probing also spares management calls from
+	// Never attach the header to workspace-agnostic calls: workspace-management
+	// endpoints (the server resolves the header's workspace before running the
+	// handler, so creating workspace X through a client configured for X would
+	// fail with RESOURCE_DOES_NOT_EXIST before the create handler is reached, and
+	// get/delete already name the target in the URL) and server-info (see
+	// serverInfoPath). Checking this before probing also spares these calls from
 	// the workspace-support probe.
-	if w.isWorkspaceManagement(req) {
+	if w.isWorkspaceHeaderExempt(req) {
 		return false, nil
 	}
 	// Only attach the workspace header to requests aimed at the configured
@@ -139,11 +149,12 @@ func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) (bool, error) {
 	return supported, nil
 }
 
-// isWorkspaceManagement reports whether req targets a workspace-management
-// endpoint (see workspaceMgmtPath). The base URL's path prefix is trimmed first
-// so a base URL that itself carries a path (e.g. https://host/mlflow) still
-// matches the API path beneath it.
-func (w *WorkspaceRoundTripper) isWorkspaceManagement(req *http.Request) bool {
+// isWorkspaceHeaderExempt reports whether req targets an endpoint that must not
+// carry the workspace header: the workspace-management endpoints (see
+// workspaceMgmtPath) or server-info (see serverInfoPath). The base URL's path
+// prefix is trimmed first so a base URL that itself carries a path (e.g.
+// https://host/mlflow) still matches the API path beneath it.
+func (w *WorkspaceRoundTripper) isWorkspaceHeaderExempt(req *http.Request) bool {
 	if req == nil || req.URL == nil {
 		return false
 	}
@@ -151,7 +162,8 @@ func (w *WorkspaceRoundTripper) isWorkspaceManagement(req *http.Request) bool {
 	if base, err := url.Parse(w.baseURL); err == nil {
 		p = strings.TrimPrefix(p, strings.TrimRight(base.Path, "/"))
 	}
-	return p == workspaceMgmtPath || strings.HasPrefix(p, workspaceMgmtPath+"/")
+	return p == serverInfoPath ||
+		p == workspaceMgmtPath || strings.HasPrefix(p, workspaceMgmtPath+"/")
 }
 
 // sameOrigin reports whether req targets the same origin as the configured
@@ -194,7 +206,7 @@ func canonicalHostPort(u *url.URL) string {
 // the route is absent. An inconclusive failure returns (false, false, err) so
 // the caller can surface the error and retry.
 func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (supported, definitive bool, err error) {
-	probeURL := w.baseURL + "/api/3.0/mlflow/server-info"
+	probeURL := w.baseURL + serverInfoPath
 	req, err := http.NewRequestWithContext(original.Context(), http.MethodGet, probeURL, nil)
 	if err != nil {
 		return false, false, fmt.Errorf("build probe request: %w", err)
