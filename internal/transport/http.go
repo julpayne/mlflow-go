@@ -193,13 +193,6 @@ func (c *Client) GetBytes(ctx context.Context, path string, query url.Values) ([
 	return c.doRaw(ctx, http.MethodGet, path, query, nil, "", false)
 }
 
-// GetBody performs a GET request and returns the response body for streaming.
-// The returned stream is capped at maxResponseBodySize. The caller must close
-// the returned ReadCloser.
-func (c *Client) GetBody(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
-	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false, true)
-}
-
 // GetBodyStream performs a GET request and returns the response body for
 // streaming without capping the response size. Use this for artifact downloads,
 // where the body is an arbitrarily large object stream the caller consumes
@@ -207,7 +200,21 @@ func (c *Client) GetBody(ctx context.Context, path string, query url.Values) (io
 // to the overall http.Client.Timeout; bound it via ctx. The caller must close the
 // returned ReadCloser.
 func (c *Client) GetBodyStream(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
-	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false, false)
+	reqURL := c.buildURL(path, query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", http.MethodGet,
+			"url", reqURL.String(),
+		)
+	}
+	return c.doRequestBody(req)
 }
 
 // PutBytes performs a PUT request with a raw body and content type.
@@ -575,39 +582,6 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	return respBody, resp.Header.Get("Content-Type"), nil
 }
 
-func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept, capResponse bool) (io.ReadCloser, error) {
-	reqURL := c.buildURL(path, query)
-
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if body != nil && contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	if jsonAccept {
-		req.Header.Set("Accept", "application/json")
-	}
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
-
-	if c.logger != nil {
-		c.logger.Debug("request",
-			"method", method,
-			"url", reqURL.String(),
-		)
-	}
-
-	return c.doRequestBody(req, capResponse)
-}
-
 func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string, headers map[string]string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, method, absoluteURL, nil)
 	if err != nil {
@@ -627,16 +601,16 @@ func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string,
 
 	// Absolute GETs are presigned artifact downloads: arbitrarily large object
 	// streams the caller consumes incrementally, so they are not size-capped.
-	return c.doRequestBody(req, false)
+	return c.doRequestBody(req)
 }
 
-func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadCloser, error) {
+// doRequestBody performs req and returns its body as an uncapped stream for the
+// caller to consume incrementally. It uses the timeout-free stream client so a
+// large artifact transfer is not aborted by the overall http.Client.Timeout.
+func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
 	start := time.Now()
 
-	// Uncapped bodies are artifact streams read incrementally by the caller; use
-	// the timeout-free stream client so a large transfer is not aborted by the
-	// overall http.Client.Timeout. Bounded reads keep the capped API client.
-	client := c.httpClient
+	client := c.streamClient
 	// headerCancel bounds the response-header phase of a streaming request. The
 	// stream client has no overall Timeout and its shared Transport may set no
 	// ResponseHeaderTimeout (e.g. http.DefaultTransport), so without this a server
@@ -653,16 +627,12 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 	var headerCancel context.CancelFunc
 	var headerTimer *time.Timer
 	var headerTimeout time.Duration
-	if !capResponse {
-		client = c.streamClient
-		_, hasDeadline := req.Context().Deadline()
-		if !hasDeadline && c.streamHeaderTimeout > 0 {
-			headerTimeout = c.streamHeaderTimeout
-			var ctx context.Context
-			ctx, headerCancel = context.WithCancel(req.Context())
-			req = req.WithContext(ctx)
-			headerTimer = time.AfterFunc(headerTimeout, headerCancel)
-		}
+	if _, hasDeadline := req.Context().Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 {
+		headerTimeout = c.streamHeaderTimeout
+		var ctx context.Context
+		ctx, headerCancel = context.WithCancel(req.Context())
+		req = req.WithContext(ctx)
+		headerTimer = time.AfterFunc(headerTimeout, headerCancel)
 	}
 
 	resp, err := client.Do(req)
@@ -710,15 +680,12 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 		return nil, c.parseError(resp.StatusCode, respBody)
 	}
 
-	if !capResponse {
-		if headerCancel != nil {
-			// Keep the header-phase context alive for the duration of the stream;
-			// release it when the caller closes the body.
-			return &cancelReadCloser{ReadCloser: resp.Body, cancel: headerCancel}, nil
-		}
-		return resp.Body, nil
+	if headerCancel != nil {
+		// Keep the header-phase context alive for the duration of the stream;
+		// release it when the caller closes the body.
+		return &cancelReadCloser{ReadCloser: resp.Body, cancel: headerCancel}, nil
 	}
-	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
+	return resp.Body, nil
 }
 
 // cancelReadCloser wraps a response body and runs cancel when the body is closed,
@@ -792,48 +759,6 @@ func readResponseBody(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("response body exceeds maximum size of %d bytes", maxResponseBodySize)
 	}
 	return data, nil
-}
-
-type limitedReadCloser struct {
-	r        io.Reader
-	closer   io.Closer
-	limit    int64
-	read     int64
-	exceeded bool
-}
-
-func newLimitedReadCloser(body io.ReadCloser, limit int64) io.ReadCloser {
-	return &limitedReadCloser{
-		r:      io.LimitReader(body, limit+1),
-		closer: body,
-		limit:  limit,
-	}
-}
-
-func (l *limitedReadCloser) Read(p []byte) (int, error) {
-	if l.exceeded {
-		return 0, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
-	}
-
-	n, err := l.r.Read(p)
-	l.read += int64(n)
-	if l.read > l.limit {
-		// Exclude the overflow sentinel byte(s) past the configured limit.
-		over := l.read - l.limit
-		n -= int(over)
-		if n < 0 {
-			n = 0
-		}
-		l.read = l.limit
-		l.exceeded = true
-		return n, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
-	}
-
-	return n, err
-}
-
-func (l *limitedReadCloser) Close() error {
-	return l.closer.Close()
 }
 
 func redactAbsoluteURLForLog(absoluteURL string) string {

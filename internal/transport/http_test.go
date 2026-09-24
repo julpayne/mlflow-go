@@ -615,35 +615,6 @@ func TestClient_GetBytes_Success(t *testing.T) {
 	}
 }
 
-func TestClient_GetBody_Success(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("expected GET, got %s", r.Method)
-		}
-		w.Write([]byte("stream-data"))
-	}))
-	defer server.Close()
-
-	client, err := New(Config{BaseURL: server.URL})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	rc, err := client.GetBody(context.Background(), "/api/artifacts/file", nil)
-	if err != nil {
-		t.Fatalf("GetBody() error = %v", err)
-	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("ReadAll() error = %v", err)
-	}
-	if string(data) != "stream-data" {
-		t.Errorf("data = %q, want stream-data", string(data))
-	}
-}
-
 func TestClient_GetBodyStream_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -674,8 +645,9 @@ func TestClient_GetBodyStream_Success(t *testing.T) {
 }
 
 // TestClient_GetBodyStream_ExceedsMaxResponseBodySize verifies that the
-// streaming download variant is not subject to the maxResponseBodySize cap that
-// GetBody enforces, so arbitrarily large artifacts can be read in full.
+// streaming download path is not subject to the maxResponseBodySize cap that
+// buffered API responses enforce, so arbitrarily large artifacts can be read in
+// full.
 func TestClient_GetBodyStream_ExceedsMaxResponseBodySize(t *testing.T) {
 	const bodySize = maxResponseBodySize + 1
 	chunk := bytes.Repeat([]byte("a"), 1<<20) // 1 MiB
@@ -897,36 +869,6 @@ func TestNew_StreamHeaderTimeout(t *testing.T) {
 				t.Errorf("streamHeaderTimeout = %v, want %v", client.streamHeaderTimeout, tt.want)
 			}
 		})
-	}
-}
-
-// TestClient_GetBody_BoundByOverallTimeout is the counterpart: the capped
-// (buffered) download path still enforces the overall http.Client.Timeout.
-func TestClient_GetBody_BoundByOverallTimeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fl, ok := w.(http.Flusher)
-		if !ok {
-			t.Fatal("ResponseWriter is not a Flusher")
-		}
-		w.Write([]byte("start"))
-		fl.Flush()
-		time.Sleep(250 * time.Millisecond)
-		w.Write([]byte("-end"))
-	}))
-	defer server.Close()
-
-	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	rc, err := client.GetBody(context.Background(), "/api/artifacts/slow", nil)
-	if err == nil {
-		_, err = io.ReadAll(rc)
-		rc.Close()
-	}
-	if err == nil {
-		t.Fatal("expected timeout error on capped GetBody, got nil")
 	}
 }
 
@@ -1375,37 +1317,6 @@ func TestReadResponseBody_ExceedsLimit(t *testing.T) {
 	_, err := readResponseBody(strings.NewReader(strings.Repeat("a", maxResponseBodySize+1)))
 	if err == nil {
 		t.Fatal("expected error for oversized body, got nil")
-	}
-}
-
-func TestLimitedReadCloser_CopyStopsAtLimit(t *testing.T) {
-	const limit int64 = 8
-	body := io.NopCloser(strings.NewReader(strings.Repeat("x", int(limit)+4)))
-	rc := newLimitedReadCloser(body, limit)
-
-	var buf strings.Builder
-	n, err := io.Copy(&buf, rc)
-	if err == nil {
-		t.Fatal("expected size error, got nil")
-	}
-	if !strings.Contains(err.Error(), "exceeds maximum size") {
-		t.Fatalf("error = %v, want exceeds maximum size", err)
-	}
-	if n != limit {
-		t.Fatalf("copied %d bytes, want %d", n, limit)
-	}
-	if int64(buf.Len()) != limit {
-		t.Fatalf("buffer len = %d, want %d", buf.Len(), limit)
-	}
-
-	// Subsequent reads must keep reporting the exceeded error with no extra bytes.
-	extra := make([]byte, 4)
-	n2, err2 := rc.Read(extra)
-	if n2 != 0 {
-		t.Fatalf("subsequent Read returned %d bytes, want 0", n2)
-	}
-	if err2 == nil || !strings.Contains(err2.Error(), "exceeds maximum size") {
-		t.Fatalf("subsequent Read error = %v, want exceeds maximum size", err2)
 	}
 }
 
