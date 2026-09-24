@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
@@ -258,8 +259,10 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	// (e.g. http.DefaultTransport), so a server that consumes the whole body and
 	// then never responds would otherwise block forever. The upload itself must
 	// stay unbounded (a large artifact can take arbitrarily long to send), so the
-	// timer starts only once the request body has been fully written: it caps the
-	// wait for headers, not the transfer.
+	// timer starts only once net/http reports the request has been fully written
+	// (via the WroteRequest httptrace callback): it caps the wait for headers, not
+	// the transfer. Body EOF is not a safe trigger because the transport can read
+	// EOF from the body before the final bytes finish transmitting.
 	var (
 		headerMu    sync.Mutex
 		headerTimer *time.Timer
@@ -269,23 +272,28 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 && req.Body != nil {
 		streamCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		req = req.WithContext(streamCtx)
 
 		timeout := c.streamHeaderTimeout
 		var stopped bool
-		req.Body = &eofTriggerReader{ReadCloser: req.Body, onEOF: func() {
-			headerMu.Lock()
-			defer headerMu.Unlock()
-			if stopped {
-				return
-			}
-			headerTimer = time.AfterFunc(timeout, func() {
+		trace := &httptrace.ClientTrace{
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				if info.Err != nil {
+					return
+				}
 				headerMu.Lock()
-				headerFired = true
-				headerMu.Unlock()
-				cancel()
-			})
-		}}
+				defer headerMu.Unlock()
+				if stopped {
+					return
+				}
+				headerTimer = time.AfterFunc(timeout, func() {
+					headerMu.Lock()
+					headerFired = true
+					headerMu.Unlock()
+					cancel()
+				})
+			},
+		}
+		req = req.WithContext(httptrace.WithClientTrace(streamCtx, trace))
 		stopHeaders = func() {
 			headerMu.Lock()
 			stopped = true
@@ -681,24 +689,6 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 		return resp.Body, nil
 	}
 	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
-}
-
-// eofTriggerReader wraps a request body and runs onEOF once, the first time the
-// underlying reader reports io.EOF (i.e. the body has been fully sent). PutReader
-// uses it to start the response-header timeout only after the upload completes, so
-// a slow or large transfer is not cut off mid-flight.
-type eofTriggerReader struct {
-	io.ReadCloser
-	onEOF func()
-	once  sync.Once
-}
-
-func (e *eofTriggerReader) Read(p []byte) (int, error) {
-	n, err := e.ReadCloser.Read(p)
-	if err == io.EOF {
-		e.once.Do(e.onEOF)
-	}
-	return n, err
 }
 
 // cancelReadCloser wraps a response body and runs cancel when the body is closed,
