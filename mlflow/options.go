@@ -8,18 +8,19 @@ import (
 
 // options holds the configuration for a Client.
 type options struct {
-	trackingURI       string
-	headers           map[string]string
-	httpClient        *http.Client
-	logger            *slog.Logger
-	insecure          bool
-	timeout           time.Duration
-	token             string
-	tokenPath         string
-	tokenSet          bool // true when WithToken was called (even with "")
-	tokenPathSet      bool // true when WithTokenPath was called (even with "")
-	workspace         string
-	workspacesSupport bool
+	trackingURI         string
+	headers             map[string]string
+	httpClient          *http.Client
+	logger              *slog.Logger
+	insecure            bool
+	timeout             time.Duration
+	streamHeaderTimeout time.Duration
+	token               string
+	tokenPath           string
+	tokenSet            bool // true when WithToken was called (even with "")
+	tokenPathSet        bool // true when WithTokenPath was called (even with "")
+	workspace           string
+	workspacesSupport   bool
 }
 
 // Option configures a Client.
@@ -81,6 +82,21 @@ func WithInsecure() Option {
 func WithTimeout(d time.Duration) Option {
 	return func(o *options) {
 		o.timeout = d
+	}
+}
+
+// WithStreamHeaderTimeout bounds how long an artifact streaming download waits
+// for response headers when the call's context has no deadline. It does not cap
+// body transfer and is independent of WithTimeout: MLflow's mlflow-artifacts
+// proxy fetches the full remote object before sending headers, so a large
+// artifact can take far longer than the API timeout to reach first byte.
+//
+// When the context passed to the download already has a deadline, that deadline
+// governs the header phase and this timeout is not applied. Zero uses a generous
+// default; a negative value disables the fallback (rely solely on the context).
+func WithStreamHeaderTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.streamHeaderTimeout = d
 	}
 }
 

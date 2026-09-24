@@ -18,6 +18,14 @@ import (
 
 const maxResponseBodySize = 100 << 20 // 100 MiB
 
+// defaultStreamHeaderTimeout is the fallback deadline for the response-header
+// phase of a streaming download when the request context carries no deadline. It
+// is deliberately generous: MLflow's mlflow-artifacts proxy fetches the whole
+// remote object from the backing store before it sends any response header, so a
+// large artifact can take well over the 30s API timeout to reach first byte. It
+// only guards against a server that accepts the connection and never responds.
+const defaultStreamHeaderTimeout = 5 * time.Minute
+
 // Client handles HTTP communication with the MLflow API.
 type Client struct {
 	baseURL    *url.URL
@@ -32,7 +40,12 @@ type Client struct {
 	// phase is separately bounded in doRequestBody (the shared Transport may set
 	// no ResponseHeaderTimeout).
 	streamClient *http.Client
-	logger       *slog.Logger
+	// streamHeaderTimeout bounds the response-header phase of a streaming download
+	// only when the request context has no deadline. Zero disables the fallback
+	// (rely solely on the context). It is independent of the API Timeout so a slow
+	// proxied download is not cut off before body transfer begins.
+	streamHeaderTimeout time.Duration
+	logger              *slog.Logger
 }
 
 // Config holds configuration for creating a transport Client.
@@ -47,6 +60,12 @@ type Config struct {
 	TokenPath         string
 	Workspace         string
 	WorkspacesSupport bool
+	// StreamHeaderTimeout bounds the response-header phase of a streaming
+	// artifact download when the request context has no deadline. It is
+	// independent of Timeout so a slow proxied download is not aborted before
+	// body transfer begins. Zero uses defaultStreamHeaderTimeout; a negative
+	// value disables the fallback entirely (rely solely on the context).
+	StreamHeaderTimeout time.Duration
 }
 
 // errorResponse represents the MLflow API error format.
@@ -98,12 +117,24 @@ func New(cfg Config) (*Client, error) {
 	streamClient := *wrapped
 	streamClient.Timeout = 0
 
+	// Resolve the streaming response-header fallback: 0 means "use the generous
+	// default", a negative value means "disable the fallback and rely solely on
+	// the request context".
+	streamHeaderTimeout := cfg.StreamHeaderTimeout
+	switch {
+	case streamHeaderTimeout == 0:
+		streamHeaderTimeout = defaultStreamHeaderTimeout
+	case streamHeaderTimeout < 0:
+		streamHeaderTimeout = 0
+	}
+
 	return &Client{
-		baseURL:      baseURL,
-		headers:      cfg.Headers,
-		httpClient:   wrapped,
-		streamClient: &streamClient,
-		logger:       cfg.Logger,
+		baseURL:             baseURL,
+		headers:             cfg.Headers,
+		httpClient:          wrapped,
+		streamClient:        &streamClient,
+		streamHeaderTimeout: streamHeaderTimeout,
+		logger:              cfg.Logger,
 	}, nil
 }
 
@@ -186,6 +217,14 @@ func (c *Client) PutBytes(ctx context.Context, path string, body []byte, content
 // retains ownership of body and is responsible for closing it if needed.
 func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, contentType string) error {
 	reqURL := c.buildURL(path, nil)
+
+	// net/http's Transport closes the request body (even on error). Wrap an
+	// io.Closer body so the caller keeps ownership, per this method's contract.
+	// *bytes.Reader/*strings.Reader/*bytes.Buffer are not closers, so they stay
+	// unwrapped and http.NewRequest can still detect them to set Content-Length.
+	if _, ok := body.(io.Closer); ok {
+		body = io.NopCloser(body)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL.String(), body)
 	if err != nil {
@@ -507,30 +546,49 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 	// stream client has no overall Timeout and its shared Transport may set no
 	// ResponseHeaderTimeout (e.g. http.DefaultTransport), so without this a server
 	// that accepts the connection but never sends headers would block forever.
-	// The timer fires cancel if headers do not arrive within httpClient.Timeout;
-	// once headers arrive we stop the timer and hand cancel to the body's Close so
-	// the transfer itself stays bound only by the caller's context.
+	//
+	// The bound is only a fallback: when the caller's context already carries a
+	// deadline, that deadline governs the whole request (headers included) and we
+	// add no timer. Otherwise we fall back to streamHeaderTimeout, which is
+	// independent of the API Timeout — MLflow's mlflow-artifacts proxy fetches the
+	// full remote object before sending headers, so a large artifact can take far
+	// longer than the 30s API timeout to reach first byte. The timer fires cancel
+	// if headers do not arrive in time; once they do we stop the timer and hand
+	// cancel to the body's Close so the transfer stays bound only by the context.
 	var headerCancel context.CancelFunc
 	var headerTimer *time.Timer
+	var headerTimeout time.Duration
 	if !capResponse {
 		client = c.streamClient
-		if t := c.httpClient.Timeout; t > 0 {
+		_, hasDeadline := req.Context().Deadline()
+		if !hasDeadline && c.streamHeaderTimeout > 0 {
+			headerTimeout = c.streamHeaderTimeout
 			var ctx context.Context
 			ctx, headerCancel = context.WithCancel(req.Context())
 			req = req.WithContext(ctx)
-			headerTimer = time.AfterFunc(t, headerCancel)
+			headerTimer = time.AfterFunc(headerTimeout, headerCancel)
 		}
 	}
 
 	resp, err := client.Do(req)
-	if headerTimer != nil {
-		headerTimer.Stop()
-	}
 	if err != nil {
+		if headerTimer != nil {
+			headerTimer.Stop()
+		}
 		if headerCancel != nil {
 			headerCancel()
 		}
 		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if headerTimer != nil && !headerTimer.Stop() {
+		// The header deadline fired (Stop reports it did not stop a pending timer)
+		// after Do returned success, so headerCancel has already canceled the
+		// request context. The response body is tied to that context and its first
+		// read would fail, so treat this as a header timeout rather than handing
+		// back a stream that is already broken.
+		resp.Body.Close()
+		headerCancel()
+		return nil, fmt.Errorf("request failed: response headers not received within %s", headerTimeout)
 	}
 
 	if c.logger != nil {

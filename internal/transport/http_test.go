@@ -753,8 +753,9 @@ func TestClient_GetBodyStream_NotBoundByOverallTimeout(t *testing.T) {
 
 // TestClient_GetBodyStream_HeaderPhaseBounded verifies that a streaming download
 // does not block forever when the server accepts the connection but never sends
-// response headers: the response-header phase is bounded by httpClient.Timeout
-// even with a context that has no deadline.
+// response headers: with a context that has no deadline, the response-header
+// phase is bounded by the dedicated StreamHeaderTimeout (independent of the API
+// Timeout).
 func TestClient_GetBodyStream_HeaderPhaseBounded(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -763,7 +764,9 @@ func TestClient_GetBodyStream_HeaderPhaseBounded(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	// A long API Timeout must not shorten the header phase; only
+	// StreamHeaderTimeout governs it.
+	client, err := New(Config{BaseURL: server.URL, Timeout: time.Minute, StreamHeaderTimeout: 50 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -781,6 +784,113 @@ func TestClient_GetBodyStream_HeaderPhaseBounded(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("GetBodyStream blocked past the header deadline")
+	}
+}
+
+// ctxIgnoringRoundTripper returns a successful response after a delay, ignoring
+// request-context cancellation. It simulates the race where the header deadline
+// fires just before Do returns success.
+type ctxIgnoringRoundTripper struct {
+	delay time.Duration
+	body  string
+}
+
+func (rt ctxIgnoringRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(rt.delay)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(rt.body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// TestClient_GetBodyStream_HeaderTimerFiresAfterSuccess covers the race where the
+// header deadline fires (cancelling the request context) just before Do returns
+// success. The returned body would be tied to a cancelled context, so its first
+// read would fail; GetBodyStream must instead report the header timeout.
+func TestClient_GetBodyStream_HeaderTimerFiresAfterSuccess(t *testing.T) {
+	hc := &http.Client{
+		Transport: ctxIgnoringRoundTripper{delay: 80 * time.Millisecond, body: "data"},
+	}
+	client, err := New(Config{
+		BaseURL:             "http://example.invalid",
+		HTTPClient:          hc,
+		StreamHeaderTimeout: 20 * time.Millisecond, // header deadline
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/file", nil)
+	if err == nil {
+		rc.Close()
+		t.Fatal("expected error when the header deadline fired despite a successful response")
+	}
+	if !strings.Contains(err.Error(), "response headers not received") {
+		t.Errorf("error = %v, want response-headers-not-received message", err)
+	}
+}
+
+// TestClient_GetBodyStream_ContextDeadlineGovernsHeaderPhase verifies that when
+// the caller's context already carries a deadline, no separate StreamHeaderTimeout
+// timer is imposed: a download whose headers arrive after StreamHeaderTimeout but
+// before the context deadline still succeeds. This is the MLflow proxy case, where
+// a large proxied artifact can take longer than a fixed header timeout to reach
+// first byte and the caller's context is the intended bound.
+func TestClient_GetBodyStream_ContextDeadlineGovernsHeaderPhase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(80 * time.Millisecond) // outlasts StreamHeaderTimeout below
+		w.Write([]byte("artifact"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, StreamHeaderTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rc, err := client.GetBodyStream(ctx, "/api/artifacts/slow-headers", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v, want nil (context deadline, not StreamHeaderTimeout, must govern)", err)
+	}
+	defer rc.Close()
+
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(body) != "artifact" {
+		t.Errorf("body = %q, want artifact", string(body))
+	}
+}
+
+// TestNew_StreamHeaderTimeout verifies how Config.StreamHeaderTimeout resolves:
+// zero uses the generous default, a positive value is kept, and a negative value
+// disables the fallback (rely solely on the request context).
+func TestNew_StreamHeaderTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  time.Duration
+		want time.Duration
+	}{
+		{"default", 0, defaultStreamHeaderTimeout},
+		{"explicit", 90 * time.Second, 90 * time.Second},
+		{"disabled", -1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := New(Config{BaseURL: "https://localhost", StreamHeaderTimeout: tt.cfg})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if client.streamHeaderTimeout != tt.want {
+				t.Errorf("streamHeaderTimeout = %v, want %v", client.streamHeaderTimeout, tt.want)
+			}
+		})
 	}
 }
 
@@ -951,6 +1061,67 @@ func TestClient_PutReader_RedirectIsError(t *testing.T) {
 				t.Errorf("redirect was followed (as %s); it must not be", redirectTarget)
 			}
 		})
+	}
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (t *trackingReadCloser) Close() error {
+	t.closed = true
+	return nil
+}
+
+// TestClient_PutReader_DoesNotCloseCallerBody verifies PutReader honors its
+// body-ownership contract: net/http's Transport closes the request body, so an
+// io.Closer body (e.g. an *os.File) must be wrapped to keep it open for the
+// caller.
+func TestClient_PutReader_DoesNotCloseCallerBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body := &trackingReadCloser{Reader: strings.NewReader("data")}
+	if err := client.PutReader(context.Background(), "/api/artifacts/file", body, "text/plain"); err != nil {
+		t.Fatalf("PutReader() error = %v", err)
+	}
+	if body.closed {
+		t.Error("PutReader closed the caller's body; it must retain ownership")
+	}
+}
+
+// TestClient_PutReader_KnownLengthSetsContentLength verifies that a non-closer
+// body whose length is known (e.g. *strings.Reader) is not wrapped, so
+// http.NewRequest still sets Content-Length instead of using chunked encoding.
+func TestClient_PutReader_KnownLengthSetsContentLength(t *testing.T) {
+	var contentLength int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentLength = r.ContentLength
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	const payload = "hello"
+	if err := client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader(payload), "text/plain"); err != nil {
+		t.Fatalf("PutReader() error = %v", err)
+	}
+	if contentLength != int64(len(payload)) {
+		t.Errorf("ContentLength = %d, want %d", contentLength, len(payload))
 	}
 }
 
