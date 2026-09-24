@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opendatahub-io/mlflow-go/internal/errors"
@@ -37,8 +38,9 @@ type Client struct {
 	// covers the entire exchange including body transfer and would otherwise abort
 	// an arbitrarily large streaming upload/download mid-transfer. Streaming
 	// transfers are bounded by the request context instead; the response-header
-	// phase is separately bounded in doRequestBody (the shared Transport may set
-	// no ResponseHeaderTimeout).
+	// phase is separately bounded (the shared Transport may set no
+	// ResponseHeaderTimeout) — for downloads in doRequestBody, and for uploads in
+	// PutReader once the request body has been fully sent.
 	streamClient *http.Client
 	// streamHeaderTimeout bounds the response-header phase of a streaming download
 	// only when the request context has no deadline. Zero disables the fallback
@@ -246,6 +248,50 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 		)
 	}
 
+	// Bound the wait for response headers, mirroring the streaming download path,
+	// but only when the caller supplied no deadline of its own. streamClient has no
+	// overall Timeout and the shared Transport may set no ResponseHeaderTimeout
+	// (e.g. http.DefaultTransport), so a server that consumes the whole body and
+	// then never responds would otherwise block forever. The upload itself must
+	// stay unbounded (a large artifact can take arbitrarily long to send), so the
+	// timer starts only once the request body has been fully written: it caps the
+	// wait for headers, not the transfer.
+	var (
+		headerMu    sync.Mutex
+		headerTimer *time.Timer
+		headerFired bool
+		stopHeaders = func() {}
+	)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 && req.Body != nil {
+		streamCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		req = req.WithContext(streamCtx)
+
+		timeout := c.streamHeaderTimeout
+		var stopped bool
+		req.Body = &eofTriggerReader{ReadCloser: req.Body, onEOF: func() {
+			headerMu.Lock()
+			defer headerMu.Unlock()
+			if stopped {
+				return
+			}
+			headerTimer = time.AfterFunc(timeout, func() {
+				headerMu.Lock()
+				headerFired = true
+				headerMu.Unlock()
+				cancel()
+			})
+		}}
+		stopHeaders = func() {
+			headerMu.Lock()
+			stopped = true
+			if headerTimer != nil {
+				headerTimer.Stop()
+			}
+			headerMu.Unlock()
+		}
+	}
+
 	// Stream the (potentially very large) body with the timeout-free client so a
 	// slow upload is not aborted by the overall http.Client.Timeout; the transfer
 	// is bounded by ctx via the request instead. Redirect following is disabled:
@@ -258,7 +304,14 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 		return http.ErrUseLastResponse
 	}
 	resp, err := uploadClient.Do(req)
+	stopHeaders()
 	if err != nil {
+		headerMu.Lock()
+		fired := headerFired
+		headerMu.Unlock()
+		if fired {
+			return fmt.Errorf("request failed: response headers not received within %s", c.streamHeaderTimeout)
+		}
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -619,6 +672,24 @@ func (c *Client) doRequestBody(req *http.Request, capResponse bool) (io.ReadClos
 		return resp.Body, nil
 	}
 	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
+}
+
+// eofTriggerReader wraps a request body and runs onEOF once, the first time the
+// underlying reader reports io.EOF (i.e. the body has been fully sent). PutReader
+// uses it to start the response-header timeout only after the upload completes, so
+// a slow or large transfer is not cut off mid-flight.
+type eofTriggerReader struct {
+	io.ReadCloser
+	onEOF func()
+	once  sync.Once
+}
+
+func (e *eofTriggerReader) Read(p []byte) (int, error) {
+	n, err := e.ReadCloser.Read(p)
+	if err == io.EOF {
+		e.once.Do(e.onEOF)
+	}
+	return n, err
 }
 
 // cancelReadCloser wraps a response body and runs cancel when the body is closed,

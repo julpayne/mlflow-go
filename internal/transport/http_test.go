@@ -1142,6 +1142,93 @@ func TestClient_PutReader_ServerError(t *testing.T) {
 	}
 }
 
+// TestClient_PutReader_HeaderPhaseBounded verifies that an upload does not block
+// forever when the server consumes the whole body and then never sends response
+// headers: with a context that has no deadline, the wait for headers is bounded by
+// StreamHeaderTimeout once the body has been sent.
+func TestClient_PutReader_HeaderPhaseBounded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) // drain the upload, then stall without responding
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client, err := New(Config{BaseURL: server.URL, StreamHeaderTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.PutReader(context.Background(), "/api/artifacts/no-headers", strings.NewReader("data"), "text/plain")
+	}()
+
+	select {
+	case perr := <-done:
+		if perr == nil {
+			t.Fatal("expected error when response headers do not arrive within the deadline")
+		}
+		if !strings.Contains(perr.Error(), "response headers not received") {
+			t.Errorf("error = %v, want response-headers-not-received message", perr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PutReader blocked past the header deadline")
+	}
+}
+
+// slowReader emits its data one chunk per Read with a delay before each, so the
+// full body takes len(chunks)*delay to send.
+type slowReader struct {
+	chunks [][]byte
+	delay  time.Duration
+	i      int
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	if s.i >= len(s.chunks) {
+		return 0, io.EOF
+	}
+	time.Sleep(s.delay)
+	n := copy(p, s.chunks[s.i])
+	s.i++
+	return n, nil
+}
+
+// TestClient_PutReader_SlowBodyNotBoundByHeaderTimeout verifies that the header
+// timeout does not cap the transfer itself: a body that takes longer than
+// StreamHeaderTimeout to send still succeeds, because the timer starts only after
+// the body reaches EOF and the server responds promptly thereafter.
+func TestClient_PutReader_SlowBodyNotBoundByHeaderTimeout(t *testing.T) {
+	var received int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		received = int(n)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, StreamHeaderTimeout: 80 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Sending takes ~4*60ms = 240ms, well past the 80ms header timeout, but the
+	// timer must not start until the body is fully sent.
+	body := &slowReader{
+		chunks: [][]byte{[]byte("aa"), []byte("bb"), []byte("cc"), []byte("dd")},
+		delay:  60 * time.Millisecond,
+	}
+	err = client.PutReader(context.Background(), "/api/artifacts/slow-body", body, "text/plain")
+	if err != nil {
+		t.Fatalf("PutReader() error = %v, want nil (header timeout must not cap the transfer)", err)
+	}
+	if received != 8 {
+		t.Errorf("server received %d bytes, want 8", received)
+	}
+}
+
 func TestClient_PostBytes_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
