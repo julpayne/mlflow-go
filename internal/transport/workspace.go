@@ -39,6 +39,14 @@ type WorkspaceRoundTripper struct {
 	probeEnabled bool
 	baseURL      string
 
+	// configuredHeaders are the client's globally-configured headers (from
+	// WithHeaders). The probe forwards them so a deployment that authenticates via
+	// a custom header (e.g. X-Api-Key behind a gateway) still authenticates the
+	// server-info probe. They are always-on headers, never the per-request,
+	// response-shaping headers (Range, If-*, Accept-Encoding) the allowlist below
+	// deliberately excludes.
+	configuredHeaders map[string]string
+
 	// probeSem is a capacity-1 semaphore guarding the one-shot probe. Acquiring
 	// it via a select also honors request cancellation, so a canceled request
 	// does not block waiting for an in-flight probe. Buffered-channel
@@ -55,17 +63,19 @@ type workspaceRTConfig struct {
 	Workspace    string
 	ProbeEnabled bool
 	BaseURL      string
+	Headers      map[string]string
 }
 
 // newWorkspaceRoundTripper creates a round-tripper that conditionally
 // attaches the workspace header.
 func newWorkspaceRoundTripper(cfg workspaceRTConfig) http.RoundTripper {
 	return &WorkspaceRoundTripper{
-		base:         cfg.Base,
-		workspace:    cfg.Workspace,
-		probeEnabled: cfg.ProbeEnabled,
-		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
-		probeSem:     make(chan struct{}, 1),
+		base:              cfg.Base,
+		workspace:         cfg.Workspace,
+		probeEnabled:      cfg.ProbeEnabled,
+		baseURL:           strings.TrimRight(cfg.BaseURL, "/"),
+		configuredHeaders: cfg.Headers,
+		probeSem:          make(chan struct{}, 1),
 	}
 }
 
@@ -211,13 +221,23 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 	if err != nil {
 		return false, false, fmt.Errorf("build probe request: %w", err)
 	}
-	// Forward only the headers the probe needs for authentication, copied by an
-	// allowlist rather than a denylist. Copying everything else from the
-	// triggering request would leak headers that change the server-info response:
-	// Range or a conditional header (If-None-Match, If-Modified-Since) can make
-	// the server answer 206/304 — which probeWorkspaces treats as inconclusive —
-	// and a caller-set Accept-Encoding disables Go's automatic decompression, so
-	// the JSON parse fails. Accept is set below so the probe always asks for JSON.
+	// Carry the client's globally-configured headers (WithHeaders) so a deployment
+	// that authenticates via a custom header (e.g. X-Api-Key behind a gateway)
+	// still authenticates the probe. These are always-on headers; the workspace
+	// header is skipped (server-info is workspace-agnostic, see serverInfoPath).
+	for k, v := range w.configuredHeaders {
+		if strings.EqualFold(k, workspaceHeader) {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+	// Forward the remaining auth-carrying headers from the triggering request by an
+	// allowlist rather than a denylist. Copying everything else from the request
+	// would leak headers that change the server-info response: Range or a
+	// conditional header (If-None-Match, If-Modified-Since) can make the server
+	// answer 206/304 — which probeWorkspaces treats as inconclusive — and a
+	// caller-set Accept-Encoding disables Go's automatic decompression, so the JSON
+	// parse fails. Accept is set below so the probe always asks for JSON.
 	for _, k := range []string{"Authorization", "Cookie", "User-Agent"} {
 		if v, ok := original.Header[http.CanonicalHeaderKey(k)]; ok {
 			req.Header[http.CanonicalHeaderKey(k)] = v
@@ -278,7 +298,7 @@ func (w *WorkspaceRoundTripper) forceProbe() error {
 // wrapClientWithWorkspace returns a shallow copy of the HTTP client with
 // the workspace round-tripper installed, or the original client if no
 // workspace is configured.
-func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool) *http.Client {
+func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool, headers map[string]string) *http.Client {
 	if workspace == "" {
 		return c
 	}
@@ -292,6 +312,7 @@ func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEna
 		Workspace:    workspace,
 		ProbeEnabled: probeEnabled,
 		BaseURL:      baseURL,
+		Headers:      headers,
 	})
 	return &clone
 }

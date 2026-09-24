@@ -665,6 +665,64 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	}
 }
 
+// TestWorkspaceRoundTripper_ProbeForwardsConfiguredHeaders verifies that the
+// client's globally-configured headers (WithHeaders) reach the probe, so a
+// deployment authenticating via a custom header (e.g. behind an API gateway)
+// still authenticates the server-info probe. The header allowlist alone would
+// drop these.
+func TestWorkspaceRoundTripper_ProbeForwardsConfiguredHeaders(t *testing.T) {
+	var probeHeader http.Header
+	var sawProbe bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/3.0/mlflow/server-info" {
+			sawProbe = true
+			probeHeader = r.Header.Clone()
+			// Simulate gateway auth: reject the probe if the custom header is missing.
+			if r.Header.Get("X-Api-Key") != "secret" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
+		Base:         http.DefaultTransport,
+		Workspace:    "ws",
+		ProbeEnabled: true,
+		BaseURL:      server.URL,
+		Headers: map[string]string{
+			"X-Api-Key": "secret",
+			// A configured workspace header must never leak onto the probe.
+			workspaceHeader: "should-be-dropped",
+		},
+	})
+	client := &http.Client{Transport: rt}
+
+	resp, err := client.Get(server.URL + "/api/2.0/mlflow/experiments/list")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if !sawProbe {
+		t.Fatal("probe was not triggered")
+	}
+	if got := probeHeader.Get("X-Api-Key"); got != "secret" {
+		t.Errorf("probe X-Api-Key = %q, want forwarded %q", got, "secret")
+	}
+	if got := probeHeader.Get(workspaceHeader); got != "" {
+		t.Errorf("probe must not carry configured workspace header, got %q", got)
+	}
+	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.isWorkspacesEnabled() {
+		t.Error("isWorkspacesEnabled() = false after successful probe, want true")
+	}
+}
+
 func TestWorkspaceRoundTripper_ProbeMalformedJSON_ReturnsError(t *testing.T) {
 	var apiReached bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -788,7 +846,7 @@ func TestExtractWorkspaceRT(t *testing.T) {
 
 func TestWrapClientWithWorkspace_InstallsRoundTripper(t *testing.T) {
 	original := &http.Client{}
-	wrapped := wrapClientWithWorkspace(original, "ws", "http://mlflow.example.com", false)
+	wrapped := wrapClientWithWorkspace(original, "ws", "http://mlflow.example.com", false, nil)
 	if wrapped == original {
 		t.Fatal("expected a new client when workspace is set")
 	}
@@ -805,7 +863,7 @@ func TestWrapClientWithWorkspace_InstallsRoundTripper(t *testing.T) {
 
 func TestWrapClientWithWorkspace_NoWorkspace(t *testing.T) {
 	original := &http.Client{}
-	result := wrapClientWithWorkspace(original, "", "http://localhost", false)
+	result := wrapClientWithWorkspace(original, "", "http://localhost", false, nil)
 	if result != original {
 		t.Error("expected same client when workspace is empty")
 	}

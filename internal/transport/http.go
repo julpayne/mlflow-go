@@ -115,7 +115,7 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
-	wrapped := wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport)
+	wrapped := wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport, cfg.Headers)
 
 	// Derive the streaming client from wrapped so it shares the same Transport
 	// (and thus connection pool, dial/TLS/response-header timeouts, and the auth
