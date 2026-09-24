@@ -361,6 +361,56 @@ func TestEnsureWorkspace_CreatesNew(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkspace_SelfConfiguredWorkspaceHeaderOmitted covers the bootstrap
+// case: a client configured for workspace X ensures X. The create POST must not
+// carry X-MLFLOW-WORKSPACE, or the server would resolve X (which does not exist
+// yet) before the create handler runs and fail with RESOURCE_DOES_NOT_EXIST.
+func TestEnsureWorkspace_SelfConfiguredWorkspaceHeaderOmitted(t *testing.T) {
+	const name = "team-x"
+
+	var createHeader string
+	var sawCreate bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/3.0/mlflow/server-info" {
+			mustEncodeJSON(t, w, map[string]any{"workspaces_enabled": true})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/3.0/mlflow/workspaces" {
+			sawCreate = true
+			createHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+			mustEncodeJSON(t, w, workspaceJSON(name))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	tc, err := transport.New(transport.Config{
+		BaseURL:           server.URL,
+		Workspace:         name,
+		WorkspacesSupport: true,
+	})
+	if err != nil {
+		t.Fatalf("transport.New() error = %v", err)
+	}
+	client := NewClient(tc)
+
+	ws, err := client.EnsureWorkspace(context.Background(), name)
+	if err != nil {
+		t.Fatalf("EnsureWorkspace(%q) error = %v", name, err)
+	}
+	if !sawCreate {
+		t.Fatal("expected a create POST to /api/3.0/mlflow/workspaces")
+	}
+	if createHeader != "" {
+		t.Errorf("create carried X-MLFLOW-WORKSPACE = %q, want none", createHeader)
+	}
+	if ws.Name != name {
+		t.Errorf("Name = %q, want %q", ws.Name, name)
+	}
+}
+
 func TestEnsureWorkspace_AlreadyExists(t *testing.T) {
 	if isLive() {
 		client := newTestClient(t, nil)

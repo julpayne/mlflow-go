@@ -12,6 +12,13 @@ import (
 
 const workspaceHeader = "X-MLFLOW-WORKSPACE"
 
+// workspaceMgmtPath is the workspace-management (CRUD) endpoint prefix. Requests
+// to it — POST .../workspaces to create, and .../workspaces/{name} to get or
+// delete — must not carry the X-MLFLOW-WORKSPACE header: these are control-plane
+// operations that address a workspace by name in the URL, not by header. See
+// shouldAttach for why sending the header here breaks workspace creation.
+const workspaceMgmtPath = "/api/3.0/mlflow/workspaces"
+
 // WorkspaceRoundTripper conditionally attaches the X-MLFLOW-WORKSPACE header.
 // When probeEnabled is true, the first request triggers a probe to
 // GET /api/3.0/mlflow/server-info to check if workspaces are enabled;
@@ -83,6 +90,15 @@ func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) (bool, error) {
 	if w.workspace == "" {
 		return false, nil
 	}
+	// Never attach the header to workspace-management calls. The server resolves
+	// the header's workspace before running the handler, so creating workspace X
+	// through a client configured for X would fail with RESOURCE_DOES_NOT_EXIST
+	// before the create handler is reached (and get/delete already name the target
+	// in the URL). Checking this before probing also spares management calls from
+	// the workspace-support probe.
+	if w.isWorkspaceManagement(req) {
+		return false, nil
+	}
 	// Only attach the workspace header to requests aimed at the configured
 	// origin. This guards against leaking the header to a different host if
 	// the client follows a cross-origin redirect.
@@ -121,6 +137,21 @@ func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) (bool, error) {
 	w.probed = true
 	w.enabled.Store(supported)
 	return supported, nil
+}
+
+// isWorkspaceManagement reports whether req targets a workspace-management
+// endpoint (see workspaceMgmtPath). The base URL's path prefix is trimmed first
+// so a base URL that itself carries a path (e.g. https://host/mlflow) still
+// matches the API path beneath it.
+func (w *WorkspaceRoundTripper) isWorkspaceManagement(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	p := req.URL.Path
+	if base, err := url.Parse(w.baseURL); err == nil {
+		p = strings.TrimPrefix(p, strings.TrimRight(base.Path, "/"))
+	}
+	return p == workspaceMgmtPath || strings.HasPrefix(p, workspaceMgmtPath+"/")
 }
 
 // sameOrigin reports whether req targets the same origin as the configured

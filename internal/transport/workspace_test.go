@@ -75,6 +75,87 @@ func TestWorkspaceRoundTripper_EmptyWorkspace(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRoundTripper_SkipsWorkspaceManagement(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"create", http.MethodPost, "/api/3.0/mlflow/workspaces"},
+		{"get", http.MethodGet, "/api/3.0/mlflow/workspaces/team-x"},
+		{"delete", http.MethodDelete, "/api/3.0/mlflow/workspaces/team-x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var receivedHeader string
+			var seen bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen = true
+				receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			client := &http.Client{
+				Transport: newWorkspaceRoundTripper(workspaceRTConfig{
+					Base:         http.DefaultTransport,
+					Workspace:    "team-x",
+					ProbeEnabled: true, // must not probe for management calls either
+					BaseURL:      server.URL,
+				}),
+			}
+
+			req, err := http.NewRequest(tt.method, server.URL+tt.path, nil)
+			if err != nil {
+				t.Fatalf("NewRequest error: %v", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request error: %v", err)
+			}
+			resp.Body.Close()
+
+			if !seen {
+				t.Fatal("server never received the request")
+			}
+			if receivedHeader != "" {
+				t.Errorf("X-MLFLOW-WORKSPACE = %q, want none for management endpoint", receivedHeader)
+			}
+		})
+	}
+}
+
+// TestWorkspaceRoundTripper_AttachesToNonManagement is the counterpart: a
+// look-alike path that is not workspace management still gets the header.
+func TestWorkspaceRoundTripper_AttachesToNonManagement(t *testing.T) {
+	var receivedHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &http.Client{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
+			Base:         http.DefaultTransport,
+			Workspace:    "team-x",
+			ProbeEnabled: false,
+			BaseURL:      server.URL,
+		}),
+	}
+
+	// Not the workspaces prefix (no "/" boundary), so the header must attach.
+	resp, err := client.Get(server.URL + "/api/3.0/mlflow/workspaces-summary")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedHeader != "team-x" {
+		t.Errorf("X-MLFLOW-WORKSPACE = %q, want team-x", receivedHeader)
+	}
+}
+
 func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOn(t *testing.T) {
 	var apiHeaders []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
