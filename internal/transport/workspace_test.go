@@ -581,15 +581,12 @@ func TestWorkspaceRoundTripper_StripsCallerHeaderWhenNotAttached(t *testing.T) {
 }
 
 func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
-	var probeAuth, probeWS, probeAccept, probeContentType string
+	var probeHeader http.Header
 	var sawProbe bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			sawProbe = true
-			probeAuth = r.Header.Get("Authorization")
-			probeWS = r.Header.Get("X-MLFLOW-WORKSPACE")
-			probeAccept = r.Header.Get("Accept")
-			probeContentType = r.Header.Get("Content-Type")
+			probeHeader = r.Header.Clone()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
 			return
@@ -610,13 +607,23 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
+	// Authentication headers are forwarded so the probe is authenticated.
 	req.Header.Set("Authorization", "Bearer token123")
+	req.Header.Set("Cookie", "session=abc")
+	req.Header.Set("User-Agent", "mlflow-go/test")
 	// A caller-supplied workspace header must never be forwarded to the probe.
 	req.Header.Set("X-MLFLOW-WORKSPACE", "caller-value")
 	// Entity headers and a non-JSON Accept from the triggering request must not
 	// bleed onto the body-less JSON probe.
 	req.Header.Set("Accept", "text/csv")
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	// Range and conditional headers would make the server answer 206/304, and
+	// Accept-Encoding would disable Go's automatic decompression — none may reach
+	// the probe.
+	req.Header.Set("Range", "bytes=0-1023")
+	req.Header.Set("If-None-Match", `"etag"`)
+	req.Header.Set("If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT")
+	req.Header.Set("Accept-Encoding", "gzip")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -627,17 +634,31 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	if !sawProbe {
 		t.Fatal("probe was not triggered")
 	}
-	if probeAuth != "Bearer token123" {
-		t.Errorf("probe Authorization = %q, want forwarded %q", probeAuth, "Bearer token123")
+	if got := probeHeader.Get("Authorization"); got != "Bearer token123" {
+		t.Errorf("probe Authorization = %q, want forwarded %q", got, "Bearer token123")
 	}
-	if probeWS != "" {
-		t.Errorf("probe must not carry workspace header, got %q", probeWS)
+	if got := probeHeader.Get("Cookie"); got != "session=abc" {
+		t.Errorf("probe Cookie = %q, want forwarded %q", got, "session=abc")
 	}
-	if probeAccept != "application/json" {
-		t.Errorf("probe Accept = %q, want %q", probeAccept, "application/json")
+	if got := probeHeader.Get("User-Agent"); got != "mlflow-go/test" {
+		t.Errorf("probe User-Agent = %q, want forwarded %q", got, "mlflow-go/test")
 	}
-	if probeContentType != "" {
-		t.Errorf("probe must not carry entity Content-Type, got %q", probeContentType)
+	if got := probeHeader.Get("X-MLFLOW-WORKSPACE"); got != "" {
+		t.Errorf("probe must not carry workspace header, got %q", got)
+	}
+	if got := probeHeader.Get("Accept"); got != "application/json" {
+		t.Errorf("probe Accept = %q, want %q", got, "application/json")
+	}
+	if got := probeHeader.Get("Content-Type"); got != "" {
+		t.Errorf("probe must not carry entity Content-Type, got %q", got)
+	}
+	// Headers that would alter the server-info response must be dropped. Note the
+	// Go transport re-adds its own Accept-Encoding: gzip for automatic
+	// decompression, which is fine; we only require the caller's value is gone.
+	for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since"} {
+		if got := probeHeader.Get(h); got != "" {
+			t.Errorf("probe must not carry %s, got %q", h, got)
+		}
 	}
 	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.isWorkspacesEnabled() {
 		t.Error("isWorkspacesEnabled() = false after successful probe, want true")

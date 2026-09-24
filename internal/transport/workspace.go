@@ -211,20 +211,17 @@ func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (support
 	if err != nil {
 		return false, false, fmt.Errorf("build probe request: %w", err)
 	}
-	// Forward the triggering request's headers (e.g. Authorization, Cookie) so
-	// the probe is authenticated, but skip the workspace header and any
-	// entity/body headers that don't apply to this body-less GET. Accept is set
-	// last so it always wins over an inherited value.
-	for k, v := range original.Header {
-		switch {
-		case strings.EqualFold(k, workspaceHeader),
-			strings.EqualFold(k, "Content-Type"),
-			strings.EqualFold(k, "Content-Length"),
-			strings.EqualFold(k, "Transfer-Encoding"),
-			strings.EqualFold(k, "Expect"):
-			continue
+	// Forward only the headers the probe needs for authentication, copied by an
+	// allowlist rather than a denylist. Copying everything else from the
+	// triggering request would leak headers that change the server-info response:
+	// Range or a conditional header (If-None-Match, If-Modified-Since) can make
+	// the server answer 206/304 — which probeWorkspaces treats as inconclusive —
+	// and a caller-set Accept-Encoding disables Go's automatic decompression, so
+	// the JSON parse fails. Accept is set below so the probe always asks for JSON.
+	for _, k := range []string{"Authorization", "Cookie", "User-Agent"} {
+		if v, ok := original.Header[http.CanonicalHeaderKey(k)]; ok {
+			req.Header[http.CanonicalHeaderKey(k)] = v
 		}
-		req.Header[k] = v
 	}
 	req.Header.Set("Accept", "application/json")
 
