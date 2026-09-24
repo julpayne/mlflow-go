@@ -765,6 +765,33 @@ func TestClient_PutReader_StreamsBody(t *testing.T) {
 	}
 }
 
+// TestClient_PutReader_RedirectIsError verifies that a 3xx response is treated
+// as a failure. A streamed body has no req.GetBody, so Go's client cannot replay
+// it across a redirect and returns the 3xx verbatim; accepting it would report a
+// stored-nothing upload as success.
+func TestClient_PutReader_RedirectIsError(t *testing.T) {
+	var putCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		putCount++
+		// No Location header, so the client cannot follow and returns the 3xx.
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+	if err == nil {
+		t.Fatal("expected error for 3xx redirect response, got nil")
+	}
+	if putCount != 1 {
+		t.Errorf("server received %d requests, want 1 (redirect not replayed)", putCount)
+	}
+}
+
 func TestClient_PutReader_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)

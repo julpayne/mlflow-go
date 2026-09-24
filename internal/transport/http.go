@@ -205,7 +205,11 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode >= 400 {
+	// Treat anything outside 2xx as a failure. A streaming body has no
+	// req.GetBody, so Go's client cannot replay it across a redirect and returns
+	// the 3xx response verbatim; accepting it would report a stored-nothing
+	// upload as success.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return c.parseError(resp.StatusCode, respBody)
 	}
 	return nil
