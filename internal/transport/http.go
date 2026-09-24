@@ -266,8 +266,7 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	var (
 		headerMu    sync.Mutex
 		headerTimer *time.Timer
-		headerFired bool
-		stopHeaders = func() {}
+		stopHeaders = func() bool { return false }
 	)
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 && req.Body != nil {
 		streamCtx, cancel := context.WithCancel(ctx)
@@ -285,22 +284,22 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 				if stopped {
 					return
 				}
-				headerTimer = time.AfterFunc(timeout, func() {
-					headerMu.Lock()
-					headerFired = true
-					headerMu.Unlock()
-					cancel()
-				})
+				headerTimer = time.AfterFunc(timeout, cancel)
 			},
 		}
 		req = req.WithContext(httptrace.WithClientTrace(streamCtx, trace))
-		stopHeaders = func() {
+		// stopHeaders disarms the timer and reports whether it had already fired.
+		// Timer.Stop returning false means the AfterFunc has run (or is running),
+		// so cancel has been called and streamCtx is cancelled; the caller must
+		// then treat the request as a header timeout even if Do returned success,
+		// because the response body is tied to that cancelled context. Reading a
+		// separate "fired" flag would be racy here: the flag is set just before
+		// cancel, so a reader could observe it still false while cancel is pending.
+		stopHeaders = func() bool {
 			headerMu.Lock()
+			defer headerMu.Unlock()
 			stopped = true
-			if headerTimer != nil {
-				headerTimer.Stop()
-			}
-			headerMu.Unlock()
+			return headerTimer != nil && !headerTimer.Stop()
 		}
 	}
 
@@ -339,15 +338,23 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	}
 
 	resp, err := uploadClient.Do(req)
-	stopHeaders()
+	fired := stopHeaders()
 	if err != nil {
-		headerMu.Lock()
-		fired := headerFired
-		headerMu.Unlock()
+		// If the header timer fired it canceled streamCtx, so Do failed with
+		// context.Canceled; surface it as a header timeout so the caller can tell
+		// it apart from its own cancellation, matching the download path.
 		if fired {
 			return fmt.Errorf("request failed: response headers not received within %s", c.streamHeaderTimeout)
 		}
 		return fmt.Errorf("request failed: %w", err)
+	}
+	if fired {
+		// The header deadline fired at the same moment Do returned success. cancel
+		// has already canceled streamCtx, so the response body is tied to a dead
+		// context and reading it would fail with context.Canceled, masking the
+		// timeout. Report the header timeout instead, matching doRequestBody.
+		resp.Body.Close()
+		return fmt.Errorf("request failed: response headers not received within %s", c.streamHeaderTimeout)
 	}
 	defer resp.Body.Close()
 
