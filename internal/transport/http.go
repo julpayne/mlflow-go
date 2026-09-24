@@ -20,7 +20,7 @@ import (
 const maxResponseBodySize = 100 << 20 // 100 MiB
 
 // defaultStreamHeaderTimeout is the fallback deadline for the response-header
-// phase of a streaming download when the request context carries no deadline. It
+// phase of a streaming transfer when the request context carries no deadline. It
 // is deliberately generous: MLflow's mlflow-artifacts proxy fetches the whole
 // remote object from the backing store before it sends any response header, so a
 // large artifact can take well over the 30s API timeout to reach first byte. It
@@ -42,10 +42,11 @@ type Client struct {
 	// ResponseHeaderTimeout) — for downloads in doRequestBody, and for uploads in
 	// PutReader once the request body has been fully sent.
 	streamClient *http.Client
-	// streamHeaderTimeout bounds the response-header phase of a streaming download
-	// only when the request context has no deadline. Zero disables the fallback
-	// (rely solely on the context). It is independent of the API Timeout so a slow
-	// proxied download is not cut off before body transfer begins.
+	// streamHeaderTimeout bounds the response-header phase of a streaming transfer
+	// (download, or upload once the request body has been sent) only when the
+	// request context has no deadline. Zero disables the fallback (rely solely on
+	// the context). It is independent of the API Timeout so a slow proxied
+	// transfer is not cut off before the object is exchanged.
 	streamHeaderTimeout time.Duration
 	logger              *slog.Logger
 }
@@ -63,10 +64,13 @@ type Config struct {
 	Workspace         string
 	WorkspacesSupport bool
 	// StreamHeaderTimeout bounds the response-header phase of a streaming
-	// artifact download when the request context has no deadline. It is
-	// independent of Timeout so a slow proxied download is not aborted before
-	// body transfer begins. Zero uses defaultStreamHeaderTimeout; a negative
-	// value disables the fallback entirely (rely solely on the context).
+	// artifact transfer (download or upload) when the request context has no
+	// deadline; for uploads the timer starts only after the request body has been
+	// sent. It is independent of Timeout so a slow proxied transfer is not aborted
+	// before the object is exchanged. Zero uses defaultStreamHeaderTimeout; a
+	// negative value disables the fallback entirely (rely solely on the context).
+	// Callers handling very large artifacts should supply a context deadline or a
+	// negative value.
 	StreamHeaderTimeout time.Duration
 }
 

@@ -85,15 +85,20 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
-// WithStreamHeaderTimeout bounds how long an artifact streaming download waits
-// for response headers when the call's context has no deadline. It does not cap
-// body transfer and is independent of WithTimeout: MLflow's mlflow-artifacts
-// proxy fetches the full remote object before sending headers, so a large
-// artifact can take far longer than the API timeout to reach first byte.
+// WithStreamHeaderTimeout bounds how long an artifact streaming transfer waits
+// for response headers when the call's context has no deadline. It applies to
+// both downloads and uploads; for uploads the timer starts only after the
+// request body has been fully sent, so it caps the wait for the response, never
+// the transfer itself. It is independent of WithTimeout: MLflow's
+// mlflow-artifacts proxy fetches the full remote object before sending headers,
+// so a large artifact can take far longer than the API timeout to reach first
+// byte.
 //
-// When the context passed to the download already has a deadline, that deadline
+// When the context passed to the call already has a deadline, that deadline
 // governs the header phase and this timeout is not applied. Zero uses a generous
 // default; a negative value disables the fallback (rely solely on the context).
+// Callers handling very large artifacts should pass a context deadline sized to
+// the workload, or a negative value to disable the fallback entirely.
 func WithStreamHeaderTimeout(d time.Duration) Option {
 	return func(o *options) {
 		o.streamHeaderTimeout = d
