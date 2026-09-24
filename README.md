@@ -304,6 +304,10 @@ err := client.Artifacts().UploadArtifact(ctx, "experiments/1/model.bin",
 
 // Download by storage path (caller must close the returned reader)
 rc, err := client.Artifacts().DownloadArtifactByPath(ctx, "experiments/1/model.bin")
+if err != nil {
+    log.Fatal(err)
+}
+defer rc.Close()
 ```
 
 Because these transfers can be arbitrarily large, they are **not** bounded by the client `WithTimeout`; bound them with a `context` deadline. When the context has no deadline, only the wait for response headers is bounded, by `mlflow.WithStreamHeaderTimeout` (default 5 minutes; a negative value disables the fallback).
