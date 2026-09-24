@@ -1184,6 +1184,50 @@ func TestClient_PutReader_HeaderPhaseBounded(t *testing.T) {
 	}
 }
 
+// TestClient_PutReader_WorkspaceProbeBounded verifies that the workspace probe,
+// which runs before the upload request is written (and so is not covered by the
+// WroteRequest-triggered header timer), is itself bounded: a server that never
+// answers /server-info must not hang an upload that has no context deadline.
+func TestClient_PutReader_WorkspaceProbeBounded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, serverInfoPath) {
+			<-release // stall the probe without ever answering
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client, err := New(Config{
+		BaseURL:             server.URL,
+		Workspace:           "team-x",
+		WorkspacesSupport:   true,
+		StreamHeaderTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+	}()
+
+	select {
+	case perr := <-done:
+		if perr == nil {
+			t.Fatal("expected error when the workspace probe never answers")
+		}
+		if !strings.Contains(perr.Error(), "workspace probe failed") {
+			t.Errorf("error = %v, want workspace-probe-failed message", perr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PutReader blocked on an unbounded workspace probe")
+	}
+}
+
 // slowReader emits its data one chunk per Read with a delay before each, so the
 // full body takes len(chunks)*delay to send.
 type slowReader struct {
@@ -1205,7 +1249,7 @@ func (s *slowReader) Read(p []byte) (int, error) {
 // TestClient_PutReader_SlowBodyNotBoundByHeaderTimeout verifies that the header
 // timeout does not cap the transfer itself: a body that takes longer than
 // StreamHeaderTimeout to send still succeeds, because the timer starts only after
-// the body reaches EOF and the server responds promptly thereafter.
+// the request is fully written and the server responds promptly thereafter.
 func TestClient_PutReader_SlowBodyNotBoundByHeaderTimeout(t *testing.T) {
 	var received int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

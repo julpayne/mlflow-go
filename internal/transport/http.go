@@ -315,6 +315,29 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	uploadClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
+
+	// Bound the workspace probe separately from the body transfer. The probe to
+	// /server-info runs inside uploadClient.Do before the request is written, so
+	// PutReader's WroteRequest-based header timer never covers it. Without a caller
+	// deadline and with a Transport that sets no ResponseHeaderTimeout, a server
+	// that never answers the probe would hang the upload indefinitely. Run the
+	// probe under a bounded context up front so its result is cached before the
+	// (deliberately unbounded) body transfer begins; the Do below then reuses the
+	// cached result instead of probing again.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 {
+		if wrt := extractWorkspaceRT(&uploadClient); wrt != nil {
+			probeCtx, cancelProbe := context.WithTimeout(ctx, c.streamHeaderTimeout)
+			// shouldAttach performs the same gating (exemption, same-origin,
+			// probeEnabled) the round-tripper applies during Do, forwarding this
+			// request's auth headers to the probe, but here under probeCtx.
+			_, probeErr := wrt.shouldAttach(req.Clone(probeCtx))
+			cancelProbe()
+			if probeErr != nil {
+				return fmt.Errorf("request failed: %w", probeErr)
+			}
+		}
+	}
+
 	resp, err := uploadClient.Do(req)
 	stopHeaders()
 	if err != nil {
