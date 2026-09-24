@@ -395,6 +395,46 @@ func TestClient_UploadArtifact_TrimsLeadingSlash(t *testing.T) {
 	}
 }
 
+// TestClient_UploadArtifact_TrimsMultipleLeadingSlashes verifies that more than
+// one leading slash is normalized, not just the first, so no doubled slash
+// reaches the backend.
+func TestClient_UploadArtifact_TrimsMultipleLeadingSlashes(t *testing.T) {
+	var receivedPath string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "///experiments/1/data.json", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedPath != "/api/2.0/mlflow-artifacts/artifacts/experiments/1/data.json" {
+		t.Errorf("path = %q, want no doubled slash", receivedPath)
+	}
+}
+
+// TestClient_UploadArtifact_RejectsTraversal verifies that a "." or ".." segment,
+// or a path that is only slashes, is rejected before any request is made.
+func TestClient_UploadArtifact_RejectsTraversal(t *testing.T) {
+	for _, path := range []string{"../secret", "a/../../b", "foo/./bar", "..", "/", "//"} {
+		t.Run(path, func(t *testing.T) {
+			var requested bool
+			client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requested = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			err := client.UploadArtifact(context.Background(), path, bytes.NewReader([]byte("x")))
+			if err == nil {
+				t.Fatalf("expected error for path %q", path)
+			}
+			if requested {
+				t.Errorf("path %q must be rejected before any HTTP request", path)
+			}
+		})
+	}
+}
+
 // --- DownloadArtifactByPath tests ---
 
 func TestClient_DownloadArtifactByPath_Success(t *testing.T) {

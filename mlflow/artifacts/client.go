@@ -164,7 +164,11 @@ func (c *Client) UploadArtifact(ctx context.Context, artifactPath string, r io.R
 		contentType = "application/octet-stream"
 	}
 
-	if err := c.transport.PutReader(ctx, proxyArtifactPath(artifactPath), r, contentType); err != nil {
+	proxyPath, err := proxyArtifactPath(artifactPath)
+	if err != nil {
+		return err
+	}
+	if err := c.transport.PutReader(ctx, proxyPath, r, contentType); err != nil {
 		return fmt.Errorf("failed to upload artifact: %w", err)
 	}
 	return nil
@@ -183,7 +187,11 @@ func (c *Client) DownloadArtifactByPath(ctx context.Context, artifactPath string
 		return nil, fmt.Errorf("mlflow: artifact path is required")
 	}
 
-	rc, err := c.transport.GetBodyStream(ctx, proxyArtifactPath(artifactPath), nil)
+	proxyPath, err := proxyArtifactPath(artifactPath)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := c.transport.GetBodyStream(ctx, proxyPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact: %w", err)
 	}
@@ -191,11 +199,23 @@ func (c *Client) DownloadArtifactByPath(ctx context.Context, artifactPath string
 }
 
 // proxyArtifactPath builds the mlflow-artifacts proxy request path for a storage
-// path. A leading slash is trimmed so an "absolute" path does not produce a
+// path. All leading slashes are trimmed so an "absolute" path does not produce a
 // doubled slash after the prefix, which some artifact backends reject or resolve
-// to a different key.
-func proxyArtifactPath(artifactPath string) string {
-	return artifactProxyPrefix + strings.TrimPrefix(artifactPath, "/")
+// to a different key. It rejects a path that is empty (or only slashes) or that
+// contains a "." or ".." segment: the transport sends storage paths verbatim
+// without collapsing such segments, so they could traverse outside the intended
+// key.
+func proxyArtifactPath(artifactPath string) (string, error) {
+	trimmed := strings.TrimLeft(artifactPath, "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("mlflow: artifact path is required")
+	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		if seg == "." || seg == ".." {
+			return "", fmt.Errorf("mlflow: artifact path must not contain %q or %q segments", ".", "..")
+		}
+	}
+	return artifactProxyPrefix + trimmed, nil
 }
 
 // isNilReader reports whether r is either an untyped nil interface or a typed
