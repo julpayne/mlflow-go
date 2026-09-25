@@ -279,7 +279,10 @@ func TestTokenFileRoundTripper_NilHeaderRequest(t *testing.T) {
 	}
 }
 
-func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
+// A caller-supplied Authorization header (e.g. one the tracking server told us to
+// forward to a presigned object-store URL) must survive on a direct foreign-origin
+// request. The round-tripper must not strip it. Regression test for issue #33.
+func TestTokenRoundTripper_PreservesCallerAuthOnForeignOrigin(t *testing.T) {
 	var gotAuth string
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -291,7 +294,7 @@ func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	rt := NewTokenRoundTripper(http.DefaultTransport, "secret", trackingOrigin)
 
 	req, _ := http.NewRequest(http.MethodGet, foreign.URL+"/callback", nil)
-	req.Header.Set("Authorization", "Bearer stale-token")
+	req.Header.Set("Authorization", "SharedKey acct:sig")
 
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -299,12 +302,12 @@ func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if gotAuth != "" {
-		t.Errorf("foreign host received Authorization = %q, want empty", gotAuth)
+	if gotAuth != "SharedKey acct:sig" {
+		t.Errorf("foreign host received Authorization = %q, want %q", gotAuth, "SharedKey acct:sig")
 	}
 }
 
-func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
+func TestTokenFileRoundTripper_PreservesCallerAuthOnForeignOrigin(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("secret"), 0600); err != nil {
 		t.Fatalf("WriteFile error: %v", err)
@@ -321,7 +324,7 @@ func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	rt := NewTokenFileRoundTripper(http.DefaultTransport, tokenFile, trackingOrigin)
 
 	req, _ := http.NewRequest(http.MethodGet, foreign.URL+"/callback", nil)
-	req.Header.Set("Authorization", "Bearer stale-token")
+	req.Header.Set("Authorization", "SharedKey acct:sig")
 
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -329,7 +332,7 @@ func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if gotAuth != "" {
-		t.Errorf("foreign host received Authorization = %q, want empty", gotAuth)
+	if gotAuth != "SharedKey acct:sig" {
+		t.Errorf("foreign host received Authorization = %q, want %q", gotAuth, "SharedKey acct:sig")
 	}
 }

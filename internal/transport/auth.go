@@ -44,9 +44,11 @@ func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			r.Header = make(http.Header)
 		}
 		r.Header.Set("Authorization", t.authValue)
-	} else {
-		r.Header.Del("Authorization")
 	}
+	// Foreign-origin requests (e.g. presigned object-store URLs) pass through
+	// untouched, preserving any Authorization the caller set. We never inject our
+	// token on a foreign origin, and Go's stdlib already strips Authorization on
+	// cross-origin redirects, so there is nothing here to strip.
 	return t.base.RoundTrip(r)
 }
 
@@ -71,9 +73,11 @@ func NewTokenFileRoundTripper(base http.RoundTripper, path string, trackingURL *
 
 func (t *tokenFileRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if requestOrigin(req) != t.origin {
-		r := req.Clone(req.Context())
-		r.Header.Del("Authorization")
-		return t.base.RoundTrip(r)
+		// Foreign-origin requests (e.g. presigned object-store URLs) pass through
+		// untouched, preserving any Authorization the caller set. We never inject
+		// our token on a foreign origin, and Go's stdlib already strips
+		// Authorization on cross-origin redirects.
+		return t.base.RoundTrip(req)
 	}
 
 	data, err := os.ReadFile(t.tokenPath)
