@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -284,6 +285,27 @@ func TestNew_CustomTimeout(t *testing.T) {
 
 	if client.httpClient.Timeout != 60*time.Second {
 		t.Errorf("timeout = %v, want 60s", client.httpClient.Timeout)
+	}
+}
+
+func TestNew_StreamClientHasNoOverallTimeout(t *testing.T) {
+	// A token installs an auth round-tripper, giving both clients a non-nil
+	// Transport so the sharing check below is meaningful.
+	client, err := New(Config{BaseURL: "https://localhost", Timeout: 60 * time.Second, Token: "tok"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if client.httpClient.Timeout != 60*time.Second {
+		t.Errorf("httpClient.Timeout = %v, want 60s", client.httpClient.Timeout)
+	}
+	if client.streamClient.Timeout != 0 {
+		t.Errorf("streamClient.Timeout = %v, want 0", client.streamClient.Timeout)
+	}
+	// The stream client must share the API client's Transport so it keeps the
+	// connection pool, auth, workspace and connection-level timeouts.
+	if client.streamClient.Transport != client.httpClient.Transport {
+		t.Error("streamClient must share httpClient's Transport")
 	}
 }
 
@@ -593,7 +615,7 @@ func TestClient_GetBytes_Success(t *testing.T) {
 	}
 }
 
-func TestClient_GetBody_Success(t *testing.T) {
+func TestClient_GetBodyStream_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
@@ -607,9 +629,9 @@ func TestClient_GetBody_Success(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	rc, err := client.GetBody(context.Background(), "/api/artifacts/file", nil)
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/file", nil)
 	if err != nil {
-		t.Fatalf("GetBody() error = %v", err)
+		t.Fatalf("GetBodyStream() error = %v", err)
 	}
 	defer rc.Close()
 
@@ -619,6 +641,255 @@ func TestClient_GetBody_Success(t *testing.T) {
 	}
 	if string(data) != "stream-data" {
 		t.Errorf("data = %q, want stream-data", string(data))
+	}
+}
+
+// TestClient_GetBodyStream_ExceedsMaxResponseBodySize verifies that the
+// streaming download path is not subject to the maxResponseBodySize cap that
+// buffered API responses enforce, so arbitrarily large artifacts can be read in
+// full.
+func TestClient_GetBodyStream_ExceedsMaxResponseBodySize(t *testing.T) {
+	const bodySize = maxResponseBodySize + 1
+	chunk := bytes.Repeat([]byte("a"), 1<<20) // 1 MiB
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remaining := int64(bodySize)
+		for remaining > 0 {
+			n := int64(len(chunk))
+			if n > remaining {
+				n = remaining
+			}
+			if _, err := w.Write(chunk[:n]); err != nil {
+				return
+			}
+			remaining -= n
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/big", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v", err)
+	}
+	defer rc.Close()
+
+	n, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		t.Fatalf("io.Copy() error = %v, want nil (stream must not be capped)", err)
+	}
+	if n != bodySize {
+		t.Errorf("read %d bytes, want %d", n, int64(bodySize))
+	}
+}
+
+// TestClient_GetBodyStream_NotBoundByOverallTimeout verifies that a streaming
+// download is not aborted by the overall http.Client.Timeout, so a slow transfer
+// that outlasts the configured timeout still completes.
+func TestClient_GetBodyStream_NotBoundByOverallTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("ResponseWriter is not a Flusher")
+		}
+		w.Write([]byte("start"))
+		fl.Flush()
+		time.Sleep(250 * time.Millisecond) // outlasts the 50ms overall Timeout
+		w.Write([]byte("-end"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/slow", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v, want nil (stream must not be bound by overall timeout)", err)
+	}
+	if string(data) != "start-end" {
+		t.Errorf("data = %q, want start-end", string(data))
+	}
+}
+
+// TestClient_GetBodyStream_HeaderPhaseBounded verifies that a streaming download
+// does not block forever when the server accepts the connection but never sends
+// response headers: with a context that has no deadline, the response-header
+// phase is bounded by the dedicated StreamHeaderTimeout (independent of the API
+// Timeout).
+func TestClient_GetBodyStream_HeaderPhaseBounded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the request open without sending headers
+	}))
+	defer server.Close()
+	defer close(release)
+
+	// A long API Timeout must not shorten the header phase; only
+	// StreamHeaderTimeout governs it.
+	client, err := New(Config{BaseURL: server.URL, Timeout: time.Minute, StreamHeaderTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, gerr := client.GetBodyStream(context.Background(), "/api/artifacts/no-headers", nil)
+		done <- gerr
+	}()
+
+	select {
+	case gerr := <-done:
+		if gerr == nil {
+			t.Fatal("expected error when headers do not arrive within the deadline")
+		}
+		// The timer cancels the request context, so Do fails with
+		// context.Canceled; the error must be reported as a header timeout, not a
+		// bare cancellation, so the caller can tell it apart from its own.
+		if !strings.Contains(gerr.Error(), "response headers not received") {
+			t.Errorf("error = %v, want response-headers-not-received message", gerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetBodyStream blocked past the header deadline")
+	}
+}
+
+// ctxIgnoringRoundTripper returns a successful response after a delay, ignoring
+// request-context cancellation. It simulates the race where the header deadline
+// fires just before Do returns success.
+type ctxIgnoringRoundTripper struct {
+	delay time.Duration
+	body  string
+}
+
+func (rt ctxIgnoringRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(rt.delay)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(rt.body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// TestClient_GetBodyStream_HeaderTimerFiresAfterSuccess covers the race where the
+// header deadline fires (cancelling the request context) just before Do returns
+// success. The returned body would be tied to a cancelled context, so its first
+// read would fail; GetBodyStream must instead report the header timeout.
+func TestClient_GetBodyStream_HeaderTimerFiresAfterSuccess(t *testing.T) {
+	hc := &http.Client{
+		Transport: ctxIgnoringRoundTripper{delay: 80 * time.Millisecond, body: "data"},
+	}
+	client, err := New(Config{
+		BaseURL:             "http://example.invalid",
+		HTTPClient:          hc,
+		StreamHeaderTimeout: 20 * time.Millisecond, // header deadline
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rc, err := client.GetBodyStream(context.Background(), "/api/artifacts/file", nil)
+	if err == nil {
+		rc.Close()
+		t.Fatal("expected error when the header deadline fired despite a successful response")
+	}
+	if !strings.Contains(err.Error(), "response headers not received") {
+		t.Errorf("error = %v, want response-headers-not-received message", err)
+	}
+}
+
+// TestClient_GetBodyStream_ContextDeadlineGovernsHeaderPhase verifies that when
+// the caller's context already carries a deadline, no separate StreamHeaderTimeout
+// timer is imposed: a download whose headers arrive after StreamHeaderTimeout but
+// before the context deadline still succeeds. This is the MLflow proxy case, where
+// a large proxied artifact can take longer than a fixed header timeout to reach
+// first byte and the caller's context is the intended bound.
+func TestClient_GetBodyStream_ContextDeadlineGovernsHeaderPhase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(80 * time.Millisecond) // outlasts StreamHeaderTimeout below
+		w.Write([]byte("artifact"))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, StreamHeaderTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rc, err := client.GetBodyStream(ctx, "/api/artifacts/slow-headers", nil)
+	if err != nil {
+		t.Fatalf("GetBodyStream() error = %v, want nil (context deadline, not StreamHeaderTimeout, must govern)", err)
+	}
+	defer rc.Close()
+
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(body) != "artifact" {
+		t.Errorf("body = %q, want artifact", string(body))
+	}
+}
+
+// TestNew_StreamHeaderTimeout verifies how Config.StreamHeaderTimeout resolves:
+// zero uses the generous default, a positive value is kept, and a negative value
+// disables the fallback (rely solely on the request context).
+func TestNew_StreamHeaderTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  time.Duration
+		want time.Duration
+	}{
+		{"default", 0, defaultStreamHeaderTimeout},
+		{"explicit", 90 * time.Second, 90 * time.Second},
+		{"disabled", -1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := New(Config{BaseURL: "https://localhost", StreamHeaderTimeout: tt.cfg})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if client.streamHeaderTimeout != tt.want {
+				t.Errorf("streamHeaderTimeout = %v, want %v", client.streamHeaderTimeout, tt.want)
+			}
+		})
+	}
+}
+
+// TestClient_PutReader_NotBoundByOverallTimeout verifies that a streaming upload
+// is not aborted by the overall http.Client.Timeout.
+func TestClient_PutReader_NotBoundByOverallTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(250 * time.Millisecond) // outlasts the 50ms overall Timeout
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutReader(context.Background(), "/api/artifacts/slow", strings.NewReader("data"), "text/plain")
+	if err != nil {
+		t.Fatalf("PutReader() error = %v, want nil (upload must not be bound by overall timeout)", err)
 	}
 }
 
@@ -646,6 +917,307 @@ func TestClient_PutBytes_Success(t *testing.T) {
 	err = client.PutBytes(context.Background(), "/api/artifacts/file", []byte("upload-data"), "application/octet-stream")
 	if err != nil {
 		t.Fatalf("PutBytes() error = %v", err)
+	}
+}
+
+func TestClient_PutReader_StreamsBody(t *testing.T) {
+	var receivedBody string
+	var receivedCT string
+	var contentLength int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		receivedCT = r.Header.Get("Content-Type")
+		contentLength = r.ContentLength
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// A pipe reader has no known length, so the request must stream via chunked
+	// transfer encoding (ContentLength == -1 server-side).
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("streamed-upload"))
+		pw.Close()
+	}()
+
+	err = client.PutReader(context.Background(), "/api/artifacts/file", pr, "application/octet-stream")
+	if err != nil {
+		t.Fatalf("PutReader() error = %v", err)
+	}
+	if receivedBody != "streamed-upload" {
+		t.Errorf("body = %q, want streamed-upload", receivedBody)
+	}
+	if receivedCT != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", receivedCT)
+	}
+	if contentLength != -1 {
+		t.Errorf("ContentLength = %d, want -1 (chunked stream)", contentLength)
+	}
+}
+
+// TestClient_PutReader_RedirectIsError verifies that a 3xx response is treated
+// as a failure even when a Location header is present. Go would otherwise follow
+// a 301/302/303 as a bodyless GET; if that GET returns 200 the upload would be
+// reported as success while the server stored nothing.
+func TestClient_PutReader_RedirectIsError(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		location string
+	}{
+		{"307 no location", http.StatusTemporaryRedirect, ""},
+		{"302 with location", http.StatusFound, "/api/artifacts/moved"},
+		{"301 with location", http.StatusMovedPermanently, "/api/artifacts/moved"},
+		{"303 with location", http.StatusSeeOther, "/api/artifacts/moved"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var redirectTarget string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/artifacts/moved" {
+					// The (wrongly) followed GET target: succeeds and stores nothing.
+					redirectTarget = r.Method
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+
+			client, err := New(Config{BaseURL: server.URL})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			err = client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+			if err == nil {
+				t.Fatal("expected error for 3xx redirect response, got nil")
+			}
+			if redirectTarget != "" {
+				t.Errorf("redirect was followed (as %s); it must not be", redirectTarget)
+			}
+		})
+	}
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (t *trackingReadCloser) Close() error {
+	t.closed = true
+	return nil
+}
+
+// TestClient_PutReader_DoesNotCloseCallerBody verifies PutReader honors its
+// body-ownership contract: net/http's Transport closes the request body, so an
+// io.Closer body (e.g. an *os.File) must be wrapped to keep it open for the
+// caller.
+func TestClient_PutReader_DoesNotCloseCallerBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body := &trackingReadCloser{Reader: strings.NewReader("data")}
+	if err := client.PutReader(context.Background(), "/api/artifacts/file", body, "text/plain"); err != nil {
+		t.Fatalf("PutReader() error = %v", err)
+	}
+	if body.closed {
+		t.Error("PutReader closed the caller's body; it must retain ownership")
+	}
+}
+
+// TestClient_PutReader_KnownLengthSetsContentLength verifies that a non-closer
+// body whose length is known (e.g. *strings.Reader) is not wrapped, so
+// http.NewRequest still sets Content-Length instead of using chunked encoding.
+func TestClient_PutReader_KnownLengthSetsContentLength(t *testing.T) {
+	var contentLength int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentLength = r.ContentLength
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	const payload = "hello"
+	if err := client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader(payload), "text/plain"); err != nil {
+		t.Fatalf("PutReader() error = %v", err)
+	}
+	if contentLength != int64(len(payload)) {
+		t.Errorf("ContentLength = %d, want %d", contentLength, len(payload))
+	}
+}
+
+func TestClient_PutReader_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	err = client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+	if err == nil {
+		t.Fatal("expected error from server 500")
+	}
+}
+
+// TestClient_PutReader_HeaderPhaseBounded verifies that an upload does not block
+// forever when the server consumes the whole body and then never sends response
+// headers: with a context that has no deadline, the wait for headers is bounded by
+// StreamHeaderTimeout once the body has been sent.
+func TestClient_PutReader_HeaderPhaseBounded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) // drain the upload, then stall without responding
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client, err := New(Config{BaseURL: server.URL, StreamHeaderTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.PutReader(context.Background(), "/api/artifacts/no-headers", strings.NewReader("data"), "text/plain")
+	}()
+
+	select {
+	case perr := <-done:
+		if perr == nil {
+			t.Fatal("expected error when response headers do not arrive within the deadline")
+		}
+		if !strings.Contains(perr.Error(), "response headers not received") {
+			t.Errorf("error = %v, want response-headers-not-received message", perr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PutReader blocked past the header deadline")
+	}
+}
+
+// TestClient_PutReader_WorkspaceProbeBounded verifies that the workspace probe,
+// which runs before the upload request is written (and so is not covered by the
+// WroteRequest-triggered header timer), is itself bounded: a server that never
+// answers /server-info must not hang an upload that has no context deadline.
+func TestClient_PutReader_WorkspaceProbeBounded(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, serverInfoPath) {
+			<-release // stall the probe without ever answering
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client, err := New(Config{
+		BaseURL:             server.URL,
+		Workspace:           "team-x",
+		WorkspacesSupport:   true,
+		StreamHeaderTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.PutReader(context.Background(), "/api/artifacts/file", strings.NewReader("data"), "text/plain")
+	}()
+
+	select {
+	case perr := <-done:
+		if perr == nil {
+			t.Fatal("expected error when the workspace probe never answers")
+		}
+		if !strings.Contains(perr.Error(), "workspace probe failed") {
+			t.Errorf("error = %v, want workspace-probe-failed message", perr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PutReader blocked on an unbounded workspace probe")
+	}
+}
+
+// slowReader emits its data one chunk per Read with a delay before each, so the
+// full body takes len(chunks)*delay to send.
+type slowReader struct {
+	chunks [][]byte
+	delay  time.Duration
+	i      int
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	if s.i >= len(s.chunks) {
+		return 0, io.EOF
+	}
+	time.Sleep(s.delay)
+	n := copy(p, s.chunks[s.i])
+	s.i++
+	return n, nil
+}
+
+// TestClient_PutReader_SlowBodyNotBoundByHeaderTimeout verifies that the header
+// timeout does not cap the transfer itself: a body that takes longer than
+// StreamHeaderTimeout to send still succeeds, because the timer starts only after
+// the request is fully written and the server responds promptly thereafter.
+func TestClient_PutReader_SlowBodyNotBoundByHeaderTimeout(t *testing.T) {
+	var received int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		received = int(n)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, StreamHeaderTimeout: 80 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Sending takes ~4*60ms = 240ms, well past the 80ms header timeout, but the
+	// timer must not start until the body is fully sent.
+	body := &slowReader{
+		chunks: [][]byte{[]byte("aa"), []byte("bb"), []byte("cc"), []byte("dd")},
+		delay:  60 * time.Millisecond,
+	}
+	err = client.PutReader(context.Background(), "/api/artifacts/slow-body", body, "text/plain")
+	if err != nil {
+		t.Fatalf("PutReader() error = %v, want nil (header timeout must not cap the transfer)", err)
+	}
+	if received != 8 {
+		t.Errorf("server received %d bytes, want 8", received)
 	}
 }
 
@@ -745,37 +1317,6 @@ func TestReadResponseBody_ExceedsLimit(t *testing.T) {
 	_, err := readResponseBody(strings.NewReader(strings.Repeat("a", maxResponseBodySize+1)))
 	if err == nil {
 		t.Fatal("expected error for oversized body, got nil")
-	}
-}
-
-func TestLimitedReadCloser_CopyStopsAtLimit(t *testing.T) {
-	const limit int64 = 8
-	body := io.NopCloser(strings.NewReader(strings.Repeat("x", int(limit)+4)))
-	rc := newLimitedReadCloser(body, limit)
-
-	var buf strings.Builder
-	n, err := io.Copy(&buf, rc)
-	if err == nil {
-		t.Fatal("expected size error, got nil")
-	}
-	if !strings.Contains(err.Error(), "exceeds maximum size") {
-		t.Fatalf("error = %v, want exceeds maximum size", err)
-	}
-	if n != limit {
-		t.Fatalf("copied %d bytes, want %d", n, limit)
-	}
-	if int64(buf.Len()) != limit {
-		t.Fatalf("buffer len = %d, want %d", buf.Len(), limit)
-	}
-
-	// Subsequent reads must keep reporting the exceeded error with no extra bytes.
-	extra := make([]byte, 4)
-	n2, err2 := rc.Read(extra)
-	if n2 != 0 {
-		t.Fatalf("subsequent Read returned %d bytes, want 0", n2)
-	}
-	if err2 == nil || !strings.Contains(err2.Error(), "exceeds maximum size") {
-		t.Fatalf("subsequent Read error = %v, want exceeds maximum size", err2)
 	}
 }
 

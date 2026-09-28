@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opendatahub-io/mlflow-go/internal/errors"
@@ -18,12 +20,36 @@ import (
 
 const maxResponseBodySize = 100 << 20 // 100 MiB
 
+// defaultStreamHeaderTimeout is the fallback deadline for the response-header
+// phase of a streaming transfer when the request context carries no deadline. It
+// is deliberately generous: MLflow's mlflow-artifacts proxy fetches the whole
+// remote object from the backing store before it sends any response header, so a
+// large artifact can take well over the 30s API timeout to reach first byte. It
+// only guards against a server that accepts the connection and never responds.
+const defaultStreamHeaderTimeout = 5 * time.Minute
+
 // Client handles HTTP communication with the MLflow API.
 type Client struct {
 	baseURL    *url.URL
 	headers    map[string]string
-	httpClient *http.Client
-	logger     *slog.Logger
+	httpClient *http.Client // API calls; overall http.Client.Timeout applies
+	// streamClient handles artifact uploads/downloads. It shares httpClient's
+	// Transport (connection pool, dial and TLS handshake timeouts, auth and
+	// workspace round-trippers) but drops the overall http.Client.Timeout, which
+	// covers the entire exchange including body transfer and would otherwise abort
+	// an arbitrarily large streaming upload/download mid-transfer. Streaming
+	// transfers are bounded by the request context instead; the response-header
+	// phase is separately bounded (the shared Transport may set no
+	// ResponseHeaderTimeout) — for downloads in doRequestBody, and for uploads in
+	// PutReader once the request body has been fully sent.
+	streamClient *http.Client
+	// streamHeaderTimeout bounds the response-header phase of a streaming transfer
+	// (download, or upload once the request body has been sent) only when the
+	// request context has no deadline. Zero disables the fallback (rely solely on
+	// the context). It is independent of the API Timeout so a slow proxied
+	// transfer is not cut off before the object is exchanged.
+	streamHeaderTimeout time.Duration
+	logger              *slog.Logger
 }
 
 // Config holds configuration for creating a transport Client.
@@ -38,6 +64,15 @@ type Config struct {
 	TokenPath         string
 	Workspace         string
 	WorkspacesSupport bool
+	// StreamHeaderTimeout bounds the response-header phase of a streaming
+	// artifact transfer (download or upload) when the request context has no
+	// deadline; for uploads the timer starts only after the request body has been
+	// sent. It is independent of Timeout so a slow proxied transfer is not aborted
+	// before the object is exchanged. Zero uses defaultStreamHeaderTimeout; a
+	// negative value disables the fallback entirely (rely solely on the context).
+	// Callers handling very large artifacts should supply a context deadline or a
+	// negative value.
+	StreamHeaderTimeout time.Duration
 }
 
 // errorResponse represents the MLflow API error format.
@@ -80,11 +115,33 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
+	wrapped := wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport, cfg.Headers)
+
+	// Derive the streaming client from wrapped so it shares the same Transport
+	// (and thus connection pool, dial/TLS/response-header timeouts, and the auth
+	// and workspace round-trippers), but without the overall Timeout that would
+	// cap the duration of a large artifact transfer.
+	streamClient := *wrapped
+	streamClient.Timeout = 0
+
+	// Resolve the streaming response-header fallback: 0 means "use the generous
+	// default", a negative value means "disable the fallback and rely solely on
+	// the request context".
+	streamHeaderTimeout := cfg.StreamHeaderTimeout
+	switch {
+	case streamHeaderTimeout == 0:
+		streamHeaderTimeout = defaultStreamHeaderTimeout
+	case streamHeaderTimeout < 0:
+		streamHeaderTimeout = 0
+	}
+
 	return &Client{
-		baseURL:    baseURL,
-		headers:    cfg.Headers,
-		httpClient: wrapClientWithWorkspace(wrapClientWithAuth(httpClient, cfg.Token, cfg.TokenPath, baseURL), cfg.Workspace, cfg.BaseURL, cfg.WorkspacesSupport),
-		logger:     cfg.Logger,
+		baseURL:             baseURL,
+		headers:             cfg.Headers,
+		httpClient:          wrapped,
+		streamClient:        &streamClient,
+		streamHeaderTimeout: streamHeaderTimeout,
+		logger:              cfg.Logger,
 	}, nil
 }
 
@@ -136,16 +193,199 @@ func (c *Client) GetBytes(ctx context.Context, path string, query url.Values) ([
 	return c.doRaw(ctx, http.MethodGet, path, query, nil, "", false)
 }
 
-// GetBody performs a GET request and returns the response body for streaming.
-// The caller must close the returned ReadCloser.
-func (c *Client) GetBody(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
-	return c.doRawBody(ctx, http.MethodGet, path, query, nil, "", false)
+// GetBodyStream performs a GET request and returns the response body for
+// streaming without capping the response size. Use this for artifact downloads,
+// where the body is an arbitrarily large object stream the caller consumes
+// incrementally rather than a buffered API response. The transfer is not subject
+// to the overall http.Client.Timeout; bound it via ctx. The caller must close the
+// returned ReadCloser.
+func (c *Client) GetBodyStream(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
+	reqURL := c.buildURL(path, query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", http.MethodGet,
+			"url", reqURL.String(),
+		)
+	}
+	return c.doRequestBody(req)
 }
 
 // PutBytes performs a PUT request with a raw body and content type.
 func (c *Client) PutBytes(ctx context.Context, path string, body []byte, contentType string) error {
 	_, _, err := c.doRaw(ctx, http.MethodPut, path, nil, body, contentType, false)
 	return err
+}
+
+// PutReader performs a PUT request that streams body as the request payload
+// without buffering it in memory, so arbitrarily large artifacts can be
+// uploaded. When body's length is not known ahead of time (e.g. an *os.File or a
+// plain io.Reader) the request uses chunked transfer encoding. The upload is not
+// subject to the overall http.Client.Timeout; bound it via ctx. The caller
+// retains ownership of body and is responsible for closing it if needed.
+func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, contentType string) error {
+	reqURL := c.buildURL(path, nil)
+
+	// net/http's Transport closes the request body (even on error). Wrap an
+	// io.Closer body so the caller keeps ownership, per this method's contract.
+	// *bytes.Reader/*strings.Reader/*bytes.Buffer are not closers, so they stay
+	// unwrapped and http.NewRequest can still detect them to set Content-Length.
+	if _, ok := body.(io.Closer); ok {
+		body = io.NopCloser(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL.String(), body)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+
+	start := time.Now()
+	if c.logger != nil {
+		c.logger.Debug("request",
+			"method", http.MethodPut,
+			"url", reqURL.String(),
+		)
+	}
+
+	// Bound the wait for response headers, mirroring the streaming download path,
+	// but only when the caller supplied no deadline of its own. streamClient has no
+	// overall Timeout and the shared Transport may set no ResponseHeaderTimeout
+	// (e.g. http.DefaultTransport), so a server that consumes the whole body and
+	// then never responds would otherwise block forever. The upload itself must
+	// stay unbounded (a large artifact can take arbitrarily long to send), so the
+	// timer starts only once net/http reports the request has been fully written
+	// (via the WroteRequest httptrace callback): it caps the wait for headers, not
+	// the transfer. Body EOF is not a safe trigger because the transport can read
+	// EOF from the body before the final bytes finish transmitting.
+	var (
+		headerMu    sync.Mutex
+		headerTimer *time.Timer
+		stopHeaders = func() bool { return false }
+	)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 && req.Body != nil {
+		streamCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		timeout := c.streamHeaderTimeout
+		var stopped bool
+		trace := &httptrace.ClientTrace{
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				if info.Err != nil {
+					return
+				}
+				headerMu.Lock()
+				defer headerMu.Unlock()
+				if stopped {
+					return
+				}
+				headerTimer = time.AfterFunc(timeout, cancel)
+			},
+		}
+		req = req.WithContext(httptrace.WithClientTrace(streamCtx, trace))
+		// stopHeaders disarms the timer and reports whether it had already fired.
+		// Timer.Stop returning false means the AfterFunc has run (or is running),
+		// so cancel has been called and streamCtx is cancelled; the caller must
+		// then treat the request as a header timeout even if Do returned success,
+		// because the response body is tied to that cancelled context. Reading a
+		// separate "fired" flag would be racy here: the flag is set just before
+		// cancel, so a reader could observe it still false while cancel is pending.
+		stopHeaders = func() bool {
+			headerMu.Lock()
+			defer headerMu.Unlock()
+			stopped = true
+			return headerTimer != nil && !headerTimer.Stop()
+		}
+	}
+
+	// Stream the (potentially very large) body with the timeout-free client so a
+	// slow upload is not aborted by the overall http.Client.Timeout; the transfer
+	// is bounded by ctx via the request instead. Redirect following is disabled:
+	// Go turns 301/302/303 into a bodyless GET (and cannot replay a streamed body
+	// for 307/308), so a followed redirect could return 200 while the server
+	// stored nothing. Returning the 3xx verbatim lets the non-2xx check below
+	// surface it as a failure.
+	uploadClient := *c.streamClient
+	uploadClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	// Bound the workspace probe separately from the body transfer. The probe to
+	// /server-info runs inside uploadClient.Do before the request is written, so
+	// PutReader's WroteRequest-based header timer never covers it. Without a caller
+	// deadline and with a Transport that sets no ResponseHeaderTimeout, a server
+	// that never answers the probe would hang the upload indefinitely. Run the
+	// probe under a bounded context up front so its result is cached before the
+	// (deliberately unbounded) body transfer begins; the Do below then reuses the
+	// cached result instead of probing again.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 {
+		if wrt := extractWorkspaceRT(&uploadClient); wrt != nil {
+			probeCtx, cancelProbe := context.WithTimeout(ctx, c.streamHeaderTimeout)
+			// shouldAttach performs the same gating (exemption, same-origin,
+			// probeEnabled) the round-tripper applies during Do, forwarding this
+			// request's auth headers to the probe, but here under probeCtx.
+			_, probeErr := wrt.shouldAttach(req.Clone(probeCtx))
+			cancelProbe()
+			if probeErr != nil {
+				return fmt.Errorf("request failed: %w", probeErr)
+			}
+		}
+	}
+
+	resp, err := uploadClient.Do(req)
+	fired := stopHeaders()
+	if err != nil {
+		// If the header timer fired it canceled streamCtx, so Do failed with
+		// context.Canceled; surface it as a header timeout so the caller can tell
+		// it apart from its own cancellation, matching the download path.
+		if fired {
+			return fmt.Errorf("request failed: response headers not received within %s", c.streamHeaderTimeout)
+		}
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if fired {
+		// The header deadline fired at the same moment Do returned success. cancel
+		// has already canceled streamCtx, so the response body is tied to a dead
+		// context and reading it would fail with context.Canceled, masking the
+		// timeout. Report the header timeout instead, matching doRequestBody.
+		resp.Body.Close()
+		return fmt.Errorf("request failed: response headers not received within %s", c.streamHeaderTimeout)
+	}
+	defer resp.Body.Close()
+
+	if c.logger != nil {
+		c.logger.Debug("response",
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+
+	// The response to a PUT is small (status/metadata); read it fully so the
+	// connection can be reused and any error body can be surfaced.
+	respBody, err := readResponseBody(resp.Body)
+	if err != nil {
+		return err
+	}
+	// Treat anything outside 2xx as a failure. A streaming body has no
+	// req.GetBody, so Go's client cannot replay it across a redirect and returns
+	// the 3xx response verbatim; accepting it would report a stored-nothing
+	// upload as success.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return c.parseError(resp.StatusCode, respBody)
+	}
+	return nil
 }
 
 // PostBytes performs a POST request with a raw body and content type.
@@ -342,39 +582,6 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	return respBody, resp.Header.Get("Content-Type"), nil
 }
 
-func (c *Client) doRawBody(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, jsonAccept bool) (io.ReadCloser, error) {
-	reqURL := c.buildURL(path, query)
-
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if body != nil && contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	if jsonAccept {
-		req.Header.Set("Accept", "application/json")
-	}
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
-
-	if c.logger != nil {
-		c.logger.Debug("request",
-			"method", method,
-			"url", reqURL.String(),
-		)
-	}
-
-	return c.doRequestBody(req)
-}
-
 func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string, headers map[string]string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, method, absoluteURL, nil)
 	if err != nil {
@@ -392,15 +599,66 @@ func (c *Client) doAbsoluteBody(ctx context.Context, method, absoluteURL string,
 		)
 	}
 
+	// Absolute GETs are presigned artifact downloads: arbitrarily large object
+	// streams the caller consumes incrementally, so they are not size-capped.
 	return c.doRequestBody(req)
 }
 
+// doRequestBody performs req and returns its body as an uncapped stream for the
+// caller to consume incrementally. It uses the timeout-free stream client so a
+// large artifact transfer is not aborted by the overall http.Client.Timeout.
 func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
 	start := time.Now()
 
-	resp, err := c.httpClient.Do(req)
+	client := c.streamClient
+	// headerCancel bounds the response-header phase of a streaming request. The
+	// stream client has no overall Timeout and its shared Transport may set no
+	// ResponseHeaderTimeout (e.g. http.DefaultTransport), so without this a server
+	// that accepts the connection but never sends headers would block forever.
+	//
+	// The bound is only a fallback: when the caller's context already carries a
+	// deadline, that deadline governs the whole request (headers included) and we
+	// add no timer. Otherwise we fall back to streamHeaderTimeout, which is
+	// independent of the API Timeout — MLflow's mlflow-artifacts proxy fetches the
+	// full remote object before sending headers, so a large artifact can take far
+	// longer than the 30s API timeout to reach first byte. The timer fires cancel
+	// if headers do not arrive in time; once they do we stop the timer and hand
+	// cancel to the body's Close so the transfer stays bound only by the context.
+	var headerCancel context.CancelFunc
+	var headerTimer *time.Timer
+	var headerTimeout time.Duration
+	if _, hasDeadline := req.Context().Deadline(); !hasDeadline && c.streamHeaderTimeout > 0 {
+		headerTimeout = c.streamHeaderTimeout
+		var ctx context.Context
+		ctx, headerCancel = context.WithCancel(req.Context())
+		req = req.WithContext(ctx)
+		headerTimer = time.AfterFunc(headerTimeout, headerCancel)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
+		// If the header timer fired it canceled the request context, so Do failed
+		// with context.Canceled. Stop reporting false then means the timer fired;
+		// surface it as a header timeout so the caller can tell it apart from its
+		// own cancellation, matching the success path and PutReader.
+		fired := headerTimer != nil && !headerTimer.Stop()
+		if headerCancel != nil {
+			headerCancel()
+		}
+		if fired {
+			return nil, fmt.Errorf("request failed: response headers not received within %s", headerTimeout)
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if headerTimer != nil && !headerTimer.Stop() {
+		// The header deadline fired (Stop reports it did not stop a pending timer)
+		// after Do returned success, so headerCancel has already canceled the
+		// request context. The response body is tied to that context and its first
+		// read would fail, so treat this as a header timeout rather than handing
+		// back a stream that is already broken.
+		resp.Body.Close()
+		headerCancel()
+		return nil, fmt.Errorf("request failed: response headers not received within %s", headerTimeout)
 	}
 
 	if c.logger != nil {
@@ -413,13 +671,34 @@ func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
 	if resp.StatusCode >= 400 {
 		respBody, readErr := readResponseBody(resp.Body)
 		resp.Body.Close()
+		if headerCancel != nil {
+			headerCancel()
+		}
 		if readErr != nil {
 			return nil, readErr
 		}
 		return nil, c.parseError(resp.StatusCode, respBody)
 	}
 
-	return newLimitedReadCloser(resp.Body, maxResponseBodySize), nil
+	if headerCancel != nil {
+		// Keep the header-phase context alive for the duration of the stream;
+		// release it when the caller closes the body.
+		return &cancelReadCloser{ReadCloser: resp.Body, cancel: headerCancel}, nil
+	}
+	return resp.Body, nil
+}
+
+// cancelReadCloser wraps a response body and runs cancel when the body is closed,
+// releasing a context created to bound the request's response-header phase.
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, headers map[string]string, body []byte) ([]byte, string, error) {
@@ -480,48 +759,6 @@ func readResponseBody(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("response body exceeds maximum size of %d bytes", maxResponseBodySize)
 	}
 	return data, nil
-}
-
-type limitedReadCloser struct {
-	r        io.Reader
-	closer   io.Closer
-	limit    int64
-	read     int64
-	exceeded bool
-}
-
-func newLimitedReadCloser(body io.ReadCloser, limit int64) io.ReadCloser {
-	return &limitedReadCloser{
-		r:      io.LimitReader(body, limit+1),
-		closer: body,
-		limit:  limit,
-	}
-}
-
-func (l *limitedReadCloser) Read(p []byte) (int, error) {
-	if l.exceeded {
-		return 0, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
-	}
-
-	n, err := l.r.Read(p)
-	l.read += int64(n)
-	if l.read > l.limit {
-		// Exclude the overflow sentinel byte(s) past the configured limit.
-		over := l.read - l.limit
-		n -= int(over)
-		if n < 0 {
-			n = 0
-		}
-		l.read = l.limit
-		l.exceeded = true
-		return n, fmt.Errorf("response body exceeds maximum size of %d bytes", l.limit)
-	}
-
-	return n, err
-}
-
-func (l *limitedReadCloser) Close() error {
-	return l.closer.Close()
 }
 
 func redactAbsoluteURLForLog(absoluteURL string) string {

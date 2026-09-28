@@ -250,3 +250,258 @@ func TestClient_LogArtifact_TrackingServerEnforces10MiB(t *testing.T) {
 		t.Error("oversized content must not be uploaded")
 	}
 }
+
+// --- UploadArtifact (path-based) tests ---
+
+func TestClient_UploadArtifact_Success(t *testing.T) {
+	var receivedPath string
+	var receivedBody string
+	var receivedContentType string
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+			http.NotFound(w, r)
+			return
+		}
+		receivedPath = r.URL.Path
+		receivedContentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "experiments/1/data.json",
+		bytes.NewReader([]byte(`{"key":"value"}`)),
+		WithUploadContentType("application/json"),
+	)
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedPath != "/api/2.0/mlflow-artifacts/artifacts/experiments/1/data.json" {
+		t.Errorf("path = %q", receivedPath)
+	}
+	if receivedBody != `{"key":"value"}` {
+		t.Errorf("body = %q", receivedBody)
+	}
+	if receivedContentType != "application/json" {
+		t.Errorf("content-type = %q, want application/json", receivedContentType)
+	}
+}
+
+func TestClient_UploadArtifact_DefaultContentType(t *testing.T) {
+	var receivedContentType string
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "file.bin", bytes.NewReader([]byte("data")))
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedContentType != "application/octet-stream" {
+		t.Errorf("content-type = %q, want application/octet-stream", receivedContentType)
+	}
+}
+
+func TestClient_UploadArtifact_EmptyPath(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	err := client.UploadArtifact(context.Background(), "", bytes.NewReader([]byte("x")))
+	if err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestClient_UploadArtifact_NilReader(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	err := client.UploadArtifact(context.Background(), "file.txt", nil)
+	if err == nil {
+		t.Error("expected error for nil reader")
+	}
+}
+
+func TestClient_UploadArtifact_TypedNilReader(t *testing.T) {
+	var unexpectedRequests []string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		unexpectedRequests = append(unexpectedRequests, r.Method+" "+r.URL.Path)
+		http.NotFound(w, r)
+	}))
+
+	var buf *bytes.Buffer // typed nil stored in io.Reader
+	err := client.UploadArtifact(context.Background(), "file.txt", buf)
+	if err == nil {
+		t.Fatal("expected error for typed-nil reader")
+	}
+	if !strings.Contains(err.Error(), "artifact reader is required") {
+		t.Errorf("error = %v, want artifact reader is required", err)
+	}
+	if len(unexpectedRequests) > 0 {
+		t.Errorf("unexpected HTTP requests: %v", unexpectedRequests)
+	}
+}
+
+// TestClient_UploadArtifact_StreamsLargeBody verifies that upload is not subject
+// to the 100 MiB buffering cap: a body larger than maxArtifactUploadSize streams
+// through to the server in full.
+func TestClient_UploadArtifact_StreamsLargeBody(t *testing.T) {
+	const bodySize = maxArtifactUploadSize + 1
+
+	var received int64
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		received = n
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	large := &byteCountReader{remaining: bodySize}
+	err := client.UploadArtifact(context.Background(), "big.bin", large)
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v, want nil (stream must not be capped)", err)
+	}
+	if received != bodySize {
+		t.Errorf("server received %d bytes, want %d", received, int64(bodySize))
+	}
+}
+
+func TestClient_UploadArtifact_ServerError(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "file.bin", bytes.NewReader([]byte("data")))
+	if err == nil {
+		t.Fatal("expected error from server 500")
+	}
+	if !strings.Contains(err.Error(), "failed to upload artifact") {
+		t.Errorf("error = %v, want failed to upload artifact", err)
+	}
+}
+
+func TestClient_UploadArtifact_TrimsLeadingSlash(t *testing.T) {
+	var receivedPath string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "/experiments/1/data.json", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedPath != "/api/2.0/mlflow-artifacts/artifacts/experiments/1/data.json" {
+		t.Errorf("path = %q, want no doubled slash", receivedPath)
+	}
+}
+
+// TestClient_UploadArtifact_TrimsMultipleLeadingSlashes verifies that more than
+// one leading slash is normalized, not just the first, so no doubled slash
+// reaches the backend.
+func TestClient_UploadArtifact_TrimsMultipleLeadingSlashes(t *testing.T) {
+	var receivedPath string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	err := client.UploadArtifact(context.Background(), "///experiments/1/data.json", bytes.NewReader([]byte("x")))
+	if err != nil {
+		t.Fatalf("UploadArtifact() error = %v", err)
+	}
+	if receivedPath != "/api/2.0/mlflow-artifacts/artifacts/experiments/1/data.json" {
+		t.Errorf("path = %q, want no doubled slash", receivedPath)
+	}
+}
+
+// TestClient_UploadArtifact_RejectsTraversal verifies that a "." or ".." segment,
+// or a path that is only slashes, is rejected before any request is made.
+func TestClient_UploadArtifact_RejectsTraversal(t *testing.T) {
+	for _, path := range []string{"../secret", "a/../../b", "foo/./bar", "..", "/", "//"} {
+		t.Run(path, func(t *testing.T) {
+			var requested bool
+			client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requested = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			err := client.UploadArtifact(context.Background(), path, bytes.NewReader([]byte("x")))
+			if err == nil {
+				t.Fatalf("expected error for path %q", path)
+			}
+			if requested {
+				t.Errorf("path %q must be rejected before any HTTP request", path)
+			}
+		})
+	}
+}
+
+// --- DownloadArtifactByPath tests ---
+
+func TestClient_DownloadArtifactByPath_Success(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+			http.NotFound(w, r)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/api/2.0/mlflow-artifacts/artifacts/") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte("downloaded-content"))
+	}))
+
+	rc, err := client.DownloadArtifactByPath(context.Background(), "experiments/1/data.json")
+	if err != nil {
+		t.Fatalf("DownloadArtifactByPath() error = %v", err)
+	}
+	defer rc.Close()
+
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(body) != "downloaded-content" {
+		t.Errorf("body = %q, want downloaded-content", string(body))
+	}
+}
+
+func TestClient_DownloadArtifactByPath_EmptyPath(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	_, err := client.DownloadArtifactByPath(context.Background(), "")
+	if err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestClient_DownloadArtifactByPath_ServerError(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+
+	_, err := client.DownloadArtifactByPath(context.Background(), "missing.json")
+	if err == nil {
+		t.Fatal("expected error from server 404")
+	}
+	if !strings.Contains(err.Error(), "failed to download artifact") {
+		t.Errorf("error = %v, want failed to download artifact", err)
+	}
+}
+
+func TestClient_DownloadArtifactByPath_TrimsLeadingSlash(t *testing.T) {
+	var receivedPath string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.Write([]byte("content"))
+	}))
+
+	rc, err := client.DownloadArtifactByPath(context.Background(), "/experiments/1/data.json")
+	if err != nil {
+		t.Fatalf("DownloadArtifactByPath() error = %v", err)
+	}
+	rc.Close()
+	if receivedPath != "/api/2.0/mlflow-artifacts/artifacts/experiments/1/data.json" {
+		t.Errorf("path = %q, want no doubled slash", receivedPath)
+	}
+}

@@ -75,6 +75,146 @@ func TestWorkspaceRoundTripper_EmptyWorkspace(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRoundTripper_SkipsWorkspaceManagement(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"create", http.MethodPost, "/api/3.0/mlflow/workspaces"},
+		{"get", http.MethodGet, "/api/3.0/mlflow/workspaces/team-x"},
+		{"delete", http.MethodDelete, "/api/3.0/mlflow/workspaces/team-x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var receivedHeader string
+			var seen bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen = true
+				receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			client := &http.Client{
+				Transport: newWorkspaceRoundTripper(workspaceRTConfig{
+					Base:         http.DefaultTransport,
+					Workspace:    "team-x",
+					ProbeEnabled: true, // must not probe for management calls either
+					BaseURL:      server.URL,
+				}),
+			}
+
+			req, err := http.NewRequest(tt.method, server.URL+tt.path, nil)
+			if err != nil {
+				t.Fatalf("NewRequest error: %v", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request error: %v", err)
+			}
+			resp.Body.Close()
+
+			if !seen {
+				t.Fatal("server never received the request")
+			}
+			if receivedHeader != "" {
+				t.Errorf("X-MLFLOW-WORKSPACE = %q, want none for management endpoint", receivedHeader)
+			}
+		})
+	}
+}
+
+// TestWorkspaceRoundTripper_AttachesToNonManagement is the counterpart: a
+// look-alike path that is not workspace management still gets the header.
+func TestWorkspaceRoundTripper_AttachesToNonManagement(t *testing.T) {
+	var receivedHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &http.Client{
+		Transport: newWorkspaceRoundTripper(workspaceRTConfig{
+			Base:         http.DefaultTransport,
+			Workspace:    "team-x",
+			ProbeEnabled: false,
+			BaseURL:      server.URL,
+		}),
+	}
+
+	// Not the workspaces prefix (no "/" boundary), so the header must attach.
+	resp, err := client.Get(server.URL + "/api/3.0/mlflow/workspaces-summary")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedHeader != "team-x" {
+		t.Errorf("X-MLFLOW-WORKSPACE = %q, want team-x", receivedHeader)
+	}
+}
+
+// TestWorkspaceRoundTripper_SkipsServerInfo verifies that a direct call to the
+// server-info endpoint (e.g. workspace.Client.GetServerInfo) never carries the
+// workspace header — the endpoint is workspace-agnostic, and attaching a header
+// naming a possibly-disabled or not-yet-created workspace would provoke the very
+// FEATURE_DISABLED / RESOURCE_DOES_NOT_EXIST errors GetServerInfo is used to
+// detect. With probing enabled the direct call must also not trigger a separate
+// probe request.
+func TestWorkspaceRoundTripper_SkipsServerInfo(t *testing.T) {
+	tests := []struct {
+		name         string
+		probeEnabled bool
+	}{
+		{"probe disabled", false},
+		{"probe enabled", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hits int
+			var receivedHeader string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/3.0/mlflow/server-info" {
+					hits++
+					receivedHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+					return
+				}
+				t.Errorf("unexpected request to %s", r.URL.Path)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			client := &http.Client{
+				Transport: newWorkspaceRoundTripper(workspaceRTConfig{
+					Base:         http.DefaultTransport,
+					Workspace:    "team-x",
+					ProbeEnabled: tt.probeEnabled,
+					BaseURL:      server.URL,
+				}),
+			}
+
+			resp, err := client.Get(server.URL + "/api/3.0/mlflow/server-info")
+			if err != nil {
+				t.Fatalf("request error: %v", err)
+			}
+			resp.Body.Close()
+
+			// Exactly the one direct call: the exemption is checked before the
+			// probe, so no extra probe request is made.
+			if hits != 1 {
+				t.Errorf("server-info hits = %d, want 1", hits)
+			}
+			if receivedHeader != "" {
+				t.Errorf("X-MLFLOW-WORKSPACE = %q, want none for server-info endpoint", receivedHeader)
+			}
+		})
+	}
+}
+
 func TestWorkspaceRoundTripper_ProbeEnabled_WorkspacesOn(t *testing.T) {
 	var apiHeaders []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -441,15 +581,12 @@ func TestWorkspaceRoundTripper_StripsCallerHeaderWhenNotAttached(t *testing.T) {
 }
 
 func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
-	var probeAuth, probeWS, probeAccept, probeContentType string
+	var probeHeader http.Header
 	var sawProbe bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/3.0/mlflow/server-info" {
 			sawProbe = true
-			probeAuth = r.Header.Get("Authorization")
-			probeWS = r.Header.Get("X-MLFLOW-WORKSPACE")
-			probeAccept = r.Header.Get("Accept")
-			probeContentType = r.Header.Get("Content-Type")
+			probeHeader = r.Header.Clone()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
 			return
@@ -470,13 +607,23 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
+	// Authentication headers are forwarded so the probe is authenticated.
 	req.Header.Set("Authorization", "Bearer token123")
+	req.Header.Set("Cookie", "session=abc")
+	req.Header.Set("User-Agent", "mlflow-go/test")
 	// A caller-supplied workspace header must never be forwarded to the probe.
 	req.Header.Set("X-MLFLOW-WORKSPACE", "caller-value")
 	// Entity headers and a non-JSON Accept from the triggering request must not
 	// bleed onto the body-less JSON probe.
 	req.Header.Set("Accept", "text/csv")
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	// Range and conditional headers would make the server answer 206/304, and
+	// Accept-Encoding would disable Go's automatic decompression — none may reach
+	// the probe.
+	req.Header.Set("Range", "bytes=0-1023")
+	req.Header.Set("If-None-Match", `"etag"`)
+	req.Header.Set("If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT")
+	req.Header.Set("Accept-Encoding", "gzip")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -487,17 +634,89 @@ func TestWorkspaceRoundTripper_ProbeForwardsHeaders(t *testing.T) {
 	if !sawProbe {
 		t.Fatal("probe was not triggered")
 	}
-	if probeAuth != "Bearer token123" {
-		t.Errorf("probe Authorization = %q, want forwarded %q", probeAuth, "Bearer token123")
+	if got := probeHeader.Get("Authorization"); got != "Bearer token123" {
+		t.Errorf("probe Authorization = %q, want forwarded %q", got, "Bearer token123")
 	}
-	if probeWS != "" {
-		t.Errorf("probe must not carry workspace header, got %q", probeWS)
+	if got := probeHeader.Get("Cookie"); got != "session=abc" {
+		t.Errorf("probe Cookie = %q, want forwarded %q", got, "session=abc")
 	}
-	if probeAccept != "application/json" {
-		t.Errorf("probe Accept = %q, want %q", probeAccept, "application/json")
+	if got := probeHeader.Get("User-Agent"); got != "mlflow-go/test" {
+		t.Errorf("probe User-Agent = %q, want forwarded %q", got, "mlflow-go/test")
 	}
-	if probeContentType != "" {
-		t.Errorf("probe must not carry entity Content-Type, got %q", probeContentType)
+	if got := probeHeader.Get("X-MLFLOW-WORKSPACE"); got != "" {
+		t.Errorf("probe must not carry workspace header, got %q", got)
+	}
+	if got := probeHeader.Get("Accept"); got != "application/json" {
+		t.Errorf("probe Accept = %q, want %q", got, "application/json")
+	}
+	if got := probeHeader.Get("Content-Type"); got != "" {
+		t.Errorf("probe must not carry entity Content-Type, got %q", got)
+	}
+	// Headers that would alter the server-info response must be dropped. Note the
+	// Go transport re-adds its own Accept-Encoding: gzip for automatic
+	// decompression, which is fine; we only require the caller's value is gone.
+	for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since"} {
+		if got := probeHeader.Get(h); got != "" {
+			t.Errorf("probe must not carry %s, got %q", h, got)
+		}
+	}
+	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.isWorkspacesEnabled() {
+		t.Error("isWorkspacesEnabled() = false after successful probe, want true")
+	}
+}
+
+// TestWorkspaceRoundTripper_ProbeForwardsConfiguredHeaders verifies that the
+// client's globally-configured headers (WithHeaders) reach the probe, so a
+// deployment authenticating via a custom header (e.g. behind an API gateway)
+// still authenticates the server-info probe. The header allowlist alone would
+// drop these.
+func TestWorkspaceRoundTripper_ProbeForwardsConfiguredHeaders(t *testing.T) {
+	var probeHeader http.Header
+	var sawProbe bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/3.0/mlflow/server-info" {
+			sawProbe = true
+			probeHeader = r.Header.Clone()
+			// Simulate gateway auth: reject the probe if the custom header is missing.
+			if r.Header.Get("X-Api-Key") != "secret" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces_enabled": true})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	rt := newWorkspaceRoundTripper(workspaceRTConfig{
+		Base:         http.DefaultTransport,
+		Workspace:    "ws",
+		ProbeEnabled: true,
+		BaseURL:      server.URL,
+		Headers: map[string]string{
+			"X-Api-Key": "secret",
+			// A configured workspace header must never leak onto the probe.
+			workspaceHeader: "should-be-dropped",
+		},
+	})
+	client := &http.Client{Transport: rt}
+
+	resp, err := client.Get(server.URL + "/api/2.0/mlflow/experiments/list")
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if !sawProbe {
+		t.Fatal("probe was not triggered")
+	}
+	if got := probeHeader.Get("X-Api-Key"); got != "secret" {
+		t.Errorf("probe X-Api-Key = %q, want forwarded %q", got, "secret")
+	}
+	if got := probeHeader.Get(workspaceHeader); got != "" {
+		t.Errorf("probe must not carry configured workspace header, got %q", got)
 	}
 	if wrt, ok := rt.(*WorkspaceRoundTripper); ok && !wrt.isWorkspacesEnabled() {
 		t.Error("isWorkspacesEnabled() = false after successful probe, want true")
@@ -627,7 +846,7 @@ func TestExtractWorkspaceRT(t *testing.T) {
 
 func TestWrapClientWithWorkspace_InstallsRoundTripper(t *testing.T) {
 	original := &http.Client{}
-	wrapped := wrapClientWithWorkspace(original, "ws", "http://mlflow.example.com", false)
+	wrapped := wrapClientWithWorkspace(original, "ws", "http://mlflow.example.com", false, nil)
 	if wrapped == original {
 		t.Fatal("expected a new client when workspace is set")
 	}
@@ -644,7 +863,7 @@ func TestWrapClientWithWorkspace_InstallsRoundTripper(t *testing.T) {
 
 func TestWrapClientWithWorkspace_NoWorkspace(t *testing.T) {
 	original := &http.Client{}
-	result := wrapClientWithWorkspace(original, "", "http://localhost", false)
+	result := wrapClientWithWorkspace(original, "", "http://localhost", false, nil)
 	if result != original {
 		t.Error("expected same client when workspace is empty")
 	}

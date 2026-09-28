@@ -141,7 +141,7 @@ func (s *Store) Download(ctx context.Context, runID, artifactURI, artifactPath s
 		}
 	}
 
-	rc, err := s.transport.GetBody(ctx, ProxyDownloadPath(storagePath), nil)
+	rc, err := s.transport.GetBodyStream(ctx, ProxyDownloadPath(storagePath), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download artifact via proxy: %w", err)
 	}
@@ -252,7 +252,7 @@ func (s *Store) downloadViaTrackingServer(ctx context.Context, runID, artifactPa
 		"run_id": []string{runID},
 		"path":   []string{artifactPath},
 	}
-	return s.transport.GetBody(ctx, trackingServerDownloadPath, query)
+	return s.transport.GetBodyStream(ctx, trackingServerDownloadPath, query)
 }
 
 func shouldFallbackFromPresigned(err error) bool {

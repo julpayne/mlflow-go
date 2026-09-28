@@ -12,6 +12,22 @@ import (
 
 const workspaceHeader = "X-MLFLOW-WORKSPACE"
 
+// workspaceMgmtPath is the workspace-management (CRUD) endpoint prefix. Requests
+// to it — POST .../workspaces to create, and .../workspaces/{name} to get or
+// delete — must not carry the X-MLFLOW-WORKSPACE header: these are control-plane
+// operations that address a workspace by name in the URL, not by header. See
+// shouldAttach for why sending the header here breaks workspace creation.
+const workspaceMgmtPath = "/api/3.0/mlflow/workspaces"
+
+// serverInfoPath reports server feature flags and is workspace-agnostic: the
+// header names a workspace the endpoint does not act on. Attaching it there is
+// counterproductive — on MLflow 3.13+ with workspaces disabled the server
+// answers with FEATURE_DISABLED, which is the very error a caller runs
+// GetServerInfo to detect, and when probing against a not-yet-created workspace
+// the server rejects the unresolved header with RESOURCE_DOES_NOT_EXIST. The
+// probe omits the header for the same reason.
+const serverInfoPath = "/api/3.0/mlflow/server-info"
+
 // WorkspaceRoundTripper conditionally attaches the X-MLFLOW-WORKSPACE header.
 // When probeEnabled is true, the first request triggers a probe to
 // GET /api/3.0/mlflow/server-info to check if workspaces are enabled;
@@ -22,6 +38,14 @@ type WorkspaceRoundTripper struct {
 	workspace    string
 	probeEnabled bool
 	baseURL      string
+
+	// configuredHeaders are the client's globally-configured headers (from
+	// WithHeaders). The probe forwards them so a deployment that authenticates via
+	// a custom header (e.g. X-Api-Key behind a gateway) still authenticates the
+	// server-info probe. They are always-on headers, never the per-request,
+	// response-shaping headers (Range, If-*, Accept-Encoding) the allowlist below
+	// deliberately excludes.
+	configuredHeaders map[string]string
 
 	// probeSem is a capacity-1 semaphore guarding the one-shot probe. Acquiring
 	// it via a select also honors request cancellation, so a canceled request
@@ -39,17 +63,19 @@ type workspaceRTConfig struct {
 	Workspace    string
 	ProbeEnabled bool
 	BaseURL      string
+	Headers      map[string]string
 }
 
 // newWorkspaceRoundTripper creates a round-tripper that conditionally
 // attaches the workspace header.
 func newWorkspaceRoundTripper(cfg workspaceRTConfig) http.RoundTripper {
 	return &WorkspaceRoundTripper{
-		base:         cfg.Base,
-		workspace:    cfg.Workspace,
-		probeEnabled: cfg.ProbeEnabled,
-		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
-		probeSem:     make(chan struct{}, 1),
+		base:              cfg.Base,
+		workspace:         cfg.Workspace,
+		probeEnabled:      cfg.ProbeEnabled,
+		baseURL:           strings.TrimRight(cfg.BaseURL, "/"),
+		configuredHeaders: cfg.Headers,
+		probeSem:          make(chan struct{}, 1),
 	}
 }
 
@@ -81,6 +107,16 @@ func (w *WorkspaceRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 
 func (w *WorkspaceRoundTripper) shouldAttach(req *http.Request) (bool, error) {
 	if w.workspace == "" {
+		return false, nil
+	}
+	// Never attach the header to workspace-agnostic calls: workspace-management
+	// endpoints (the server resolves the header's workspace before running the
+	// handler, so creating workspace X through a client configured for X would
+	// fail with RESOURCE_DOES_NOT_EXIST before the create handler is reached, and
+	// get/delete already name the target in the URL) and server-info (see
+	// serverInfoPath). Checking this before probing also spares these calls from
+	// the workspace-support probe.
+	if w.isWorkspaceHeaderExempt(req) {
 		return false, nil
 	}
 	// Only attach the workspace header to requests aimed at the configured
@@ -123,6 +159,23 @@ func (w *WorkspaceRoundTripper) ensureProbed(req *http.Request) (bool, error) {
 	return supported, nil
 }
 
+// isWorkspaceHeaderExempt reports whether req targets an endpoint that must not
+// carry the workspace header: the workspace-management endpoints (see
+// workspaceMgmtPath) or server-info (see serverInfoPath). The base URL's path
+// prefix is trimmed first so a base URL that itself carries a path (e.g.
+// https://host/mlflow) still matches the API path beneath it.
+func (w *WorkspaceRoundTripper) isWorkspaceHeaderExempt(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	p := req.URL.Path
+	if base, err := url.Parse(w.baseURL); err == nil {
+		p = strings.TrimPrefix(p, strings.TrimRight(base.Path, "/"))
+	}
+	return p == serverInfoPath ||
+		p == workspaceMgmtPath || strings.HasPrefix(p, workspaceMgmtPath+"/")
+}
+
 // sameOrigin reports whether req targets the same origin as the configured
 // base URL. Scheme and host are compared case-insensitively, and the default
 // port for the scheme is normalized so that, e.g., https://example.com and
@@ -163,25 +216,32 @@ func canonicalHostPort(u *url.URL) string {
 // the route is absent. An inconclusive failure returns (false, false, err) so
 // the caller can surface the error and retry.
 func (w *WorkspaceRoundTripper) probeWorkspaces(original *http.Request) (supported, definitive bool, err error) {
-	probeURL := w.baseURL + "/api/3.0/mlflow/server-info"
+	probeURL := w.baseURL + serverInfoPath
 	req, err := http.NewRequestWithContext(original.Context(), http.MethodGet, probeURL, nil)
 	if err != nil {
 		return false, false, fmt.Errorf("build probe request: %w", err)
 	}
-	// Forward the triggering request's headers (e.g. Authorization, Cookie) so
-	// the probe is authenticated, but skip the workspace header and any
-	// entity/body headers that don't apply to this body-less GET. Accept is set
-	// last so it always wins over an inherited value.
-	for k, v := range original.Header {
-		switch {
-		case strings.EqualFold(k, workspaceHeader),
-			strings.EqualFold(k, "Content-Type"),
-			strings.EqualFold(k, "Content-Length"),
-			strings.EqualFold(k, "Transfer-Encoding"),
-			strings.EqualFold(k, "Expect"):
+	// Carry the client's globally-configured headers (WithHeaders) so a deployment
+	// that authenticates via a custom header (e.g. X-Api-Key behind a gateway)
+	// still authenticates the probe. These are always-on headers; the workspace
+	// header is skipped (server-info is workspace-agnostic, see serverInfoPath).
+	for k, v := range w.configuredHeaders {
+		if strings.EqualFold(k, workspaceHeader) {
 			continue
 		}
-		req.Header[k] = v
+		req.Header.Set(k, v)
+	}
+	// Forward the remaining auth-carrying headers from the triggering request by an
+	// allowlist rather than a denylist. Copying everything else from the request
+	// would leak headers that change the server-info response: Range or a
+	// conditional header (If-None-Match, If-Modified-Since) can make the server
+	// answer 206/304 — which probeWorkspaces treats as inconclusive — and a
+	// caller-set Accept-Encoding disables Go's automatic decompression, so the JSON
+	// parse fails. Accept is set below so the probe always asks for JSON.
+	for _, k := range []string{"Authorization", "Cookie", "User-Agent"} {
+		if v, ok := original.Header[http.CanonicalHeaderKey(k)]; ok {
+			req.Header[http.CanonicalHeaderKey(k)] = v
+		}
 	}
 	req.Header.Set("Accept", "application/json")
 
@@ -238,7 +298,7 @@ func (w *WorkspaceRoundTripper) forceProbe() error {
 // wrapClientWithWorkspace returns a shallow copy of the HTTP client with
 // the workspace round-tripper installed, or the original client if no
 // workspace is configured.
-func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool) *http.Client {
+func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEnabled bool, headers map[string]string) *http.Client {
 	if workspace == "" {
 		return c
 	}
@@ -252,6 +312,7 @@ func wrapClientWithWorkspace(c *http.Client, workspace, baseURL string, probeEna
 		Workspace:    workspace,
 		ProbeEnabled: probeEnabled,
 		BaseURL:      baseURL,
+		Headers:      headers,
 	})
 	return &clone
 }
