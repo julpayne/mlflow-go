@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -279,7 +280,10 @@ func TestTokenFileRoundTripper_NilHeaderRequest(t *testing.T) {
 	}
 }
 
-func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
+// A caller-supplied Authorization header (e.g. one the tracking server told us to
+// forward to a presigned object-store URL) must survive on a direct foreign-origin
+// request. The round-tripper must not strip it. Regression test for issue #33.
+func TestTokenRoundTripper_PreservesCallerAuthOnForeignOrigin(t *testing.T) {
 	var gotAuth string
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -291,7 +295,7 @@ func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	rt := NewTokenRoundTripper(http.DefaultTransport, "secret", trackingOrigin)
 
 	req, _ := http.NewRequest(http.MethodGet, foreign.URL+"/callback", nil)
-	req.Header.Set("Authorization", "Bearer stale-token")
+	req.Header.Set("Authorization", "SharedKey acct:sig")
 
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -299,12 +303,12 @@ func TestTokenRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if gotAuth != "" {
-		t.Errorf("foreign host received Authorization = %q, want empty", gotAuth)
+	if gotAuth != "SharedKey acct:sig" {
+		t.Errorf("foreign host received Authorization = %q, want %q", gotAuth, "SharedKey acct:sig")
 	}
 }
 
-func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
+func TestTokenFileRoundTripper_PreservesCallerAuthOnForeignOrigin(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("secret"), 0600); err != nil {
 		t.Fatalf("WriteFile error: %v", err)
@@ -321,7 +325,7 @@ func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	rt := NewTokenFileRoundTripper(http.DefaultTransport, tokenFile, trackingOrigin)
 
 	req, _ := http.NewRequest(http.MethodGet, foreign.URL+"/callback", nil)
-	req.Header.Set("Authorization", "Bearer stale-token")
+	req.Header.Set("Authorization", "SharedKey acct:sig")
 
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -329,7 +333,184 @@ func TestTokenFileRoundTripper_StripsAuthOnForeignOrigin(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if gotAuth != "" {
-		t.Errorf("foreign host received Authorization = %q, want empty", gotAuth)
+	if gotAuth != "SharedKey acct:sig" {
+		t.Errorf("foreign host received Authorization = %q, want %q", gotAuth, "SharedKey acct:sig")
+	}
+}
+
+// stripAuthOnCrossOriginRedirect must remove a caller-supplied Authorization
+// header whenever a redirect crosses an exact-origin boundary. net/http alone
+// does not cover the subdomain, different-port, or different-scheme cases
+// because it compares hostnames only and ignores scheme and port.
+func TestStripAuthOnCrossOriginRedirect(t *testing.T) {
+	newReq := func(rawURL string) *http.Request {
+		req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatalf("http.NewRequest(%q): %v", rawURL, err)
+		}
+		req.Header.Set("Authorization", "SharedKey acct:sig")
+		return req
+	}
+
+	tests := []struct {
+		name     string
+		from     string
+		to       string
+		wantAuth string
+	}{
+		{"same exact origin keeps auth", "https://tracking.example.com/a", "https://tracking.example.com/b", "SharedKey acct:sig"},
+		{"subdomain strips auth", "https://tracking.example.com/a", "https://sub.tracking.example.com/b", ""},
+		{"different port strips auth", "https://tracking.example.com:443/a", "https://tracking.example.com:8443/b", ""},
+		{"different scheme strips auth", "https://tracking.example.com/a", "http://tracking.example.com/b", ""},
+		{"foreign host strips auth", "https://tracking.example.com/a", "https://evil.example/b", ""},
+	}
+
+	check := stripAuthOnCrossOriginRedirect(nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := newReq(tt.to)
+			if err := check(req, []*http.Request{newReq(tt.from)}); err != nil {
+				t.Fatalf("CheckRedirect error: %v", err)
+			}
+			if got := req.Header.Get("Authorization"); got != tt.wantAuth {
+				t.Errorf("Authorization = %q, want %q", got, tt.wantAuth)
+			}
+		})
+	}
+}
+
+func TestStripAuthOnCrossOriginRedirect_DelegatesToPrev(t *testing.T) {
+	sentinel := fmt.Errorf("prev decided")
+	called := false
+	check := stripAuthOnCrossOriginRedirect(func(_ *http.Request, _ []*http.Request) error {
+		called = true
+		return sentinel
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "https://tracking.example.com/a", nil)
+	via, _ := http.NewRequest(http.MethodGet, "https://tracking.example.com/b", nil)
+
+	if err := check(req, []*http.Request{via}); err != sentinel {
+		t.Errorf("error = %v, want sentinel", err)
+	}
+	if !called {
+		t.Error("prev CheckRedirect was not invoked")
+	}
+}
+
+func TestStripAuthOnCrossOriginRedirect_DefaultCap(t *testing.T) {
+	check := stripAuthOnCrossOriginRedirect(nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://tracking.example.com/a", nil)
+
+	via := make([]*http.Request, 10)
+	for i := range via {
+		via[i] = req
+	}
+	if err := check(req, via); err == nil {
+		t.Error("expected error after 10 redirects, got nil")
+	}
+	if err := check(req, via[:9]); err != nil {
+		t.Errorf("unexpected error at 9 redirects: %v", err)
+	}
+}
+
+// End-to-end: the tracking server redirects to the same host on a different port
+// (a different exact origin that net/http would NOT strip on its own). A
+// caller-supplied Authorization must not reach the redirect target.
+func TestWrapClientWithAuth_StripsCallerAuthOnCrossOriginRedirect_Token(t *testing.T) {
+	assertCallerAuthStrippedOnCrossOriginRedirect(t, func(trackingURL *url.URL) *http.Client {
+		return wrapClientWithAuth(&http.Client{}, "tracking-token", "", trackingURL)
+	})
+}
+
+func TestWrapClientWithAuth_StripsCallerAuthOnCrossOriginRedirect_TokenFile(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("tracking-token"), 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	assertCallerAuthStrippedOnCrossOriginRedirect(t, func(trackingURL *url.URL) *http.Client {
+		return wrapClientWithAuth(&http.Client{}, "", tokenFile, trackingURL)
+	})
+}
+
+func assertCallerAuthStrippedOnCrossOriginRedirect(t *testing.T, newClient func(trackingURL *url.URL) *http.Client) {
+	t.Helper()
+
+	var dstAuth string
+	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dstAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer dst.Close()
+
+	// Same host (127.0.0.1), different port: net/http would carry the header
+	// across; our CheckRedirect must strip it.
+	tracking := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, dst.URL+"/callback", http.StatusTemporaryRedirect)
+	}))
+	defer tracking.Close()
+
+	client := newClient(mustParseURL(t, tracking.URL))
+	req, err := http.NewRequest(http.MethodGet, tracking.URL+"/start", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest error: %v", err)
+	}
+	req.Header.Set("Authorization", "SharedKey acct:sig")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if dstAuth != "" {
+		t.Errorf("redirect target received Authorization = %q, want empty", dstAuth)
+	}
+}
+
+// End-to-end two-hop redirect: tracking -> dst -> dst (same foreign origin on the
+// second hop). net/http re-copies the initial request's Authorization on every
+// hop, and its sensitive-header strip is port-insensitive, so the second hop
+// (whose origin matches the preceding hop but differs from the initial by port)
+// would leak the caller credential if the check only compared against the
+// preceding hop. The credential must reach neither hop.
+func TestWrapClientWithAuth_StripsCallerAuthAcrossTwoHopRedirect(t *testing.T) {
+	var authSeen []string
+	var dst *httptest.Server
+	dst = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authSeen = append(authSeen, r.Header.Get("Authorization"))
+		if r.URL.Path == "/hop" {
+			http.Redirect(w, r, dst.URL+"/final", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer dst.Close()
+
+	tracking := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, dst.URL+"/hop", http.StatusTemporaryRedirect)
+	}))
+	defer tracking.Close()
+
+	client := wrapClientWithAuth(&http.Client{}, "tracking-token", "", mustParseURL(t, tracking.URL))
+	req, err := http.NewRequest(http.MethodGet, tracking.URL+"/start", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest error: %v", err)
+	}
+	req.Header.Set("Authorization", "SharedKey acct:sig")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(authSeen) != 2 {
+		t.Fatalf("foreign origin received %d requests, want 2", len(authSeen))
+	}
+	for i, got := range authSeen {
+		if got != "" {
+			t.Errorf("foreign hop %d received Authorization = %q, want empty", i, got)
+		}
 	}
 }
