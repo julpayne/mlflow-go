@@ -1723,8 +1723,8 @@ type RunInfo struct {
 	EndTime *int64 `protobuf:"varint,9,opt,name=end_time,json=endTime" json:"end_time,omitempty"`
 	// URI of the directory where artifacts should be uploaded.
 	// This can be a local path (starting with "/"), or a distributed file system (DFS)
-	// path, like ``s3://bucket/directory`` or ``dbfs:/my/directory``.
-	// If not set, the local ``./mlruns`` directory is  chosen.
+	// path, like “s3://bucket/directory“ or “dbfs:/my/directory“.
+	// If not set, the local “./mlruns“ directory is  chosen.
 	ArtifactUri *string `protobuf:"bytes,13,opt,name=artifact_uri,json=artifactUri" json:"artifact_uri,omitempty"`
 	// Current life cycle stage of the experiment : OneOf("active", "deleted")
 	LifecycleStage *string `protobuf:"bytes,14,opt,name=lifecycle_stage,json=lifecycleStage" json:"lifecycle_stage,omitempty"`
@@ -2340,14 +2340,14 @@ type SearchExperiments struct {
 	// experiments. The syntax is a subset of SQL that supports ANDing together binary operations
 	// between an attribute or tag, and a constant.
 	//
-	// Example: ``name LIKE 'test-%' AND tags.key = 'value'``
+	// Example: “name LIKE 'test-%' AND tags.key = 'value'“
 	//
 	// You can select columns with special characters (hyphen, space, period, etc.) by using
 	// double quotes or backticks.
 	//
-	// Example: ``tags."extra-key" = 'value'`` or ``tags.`extra-key` = 'value'``
+	// Example: “tags."extra-key" = 'value'“ or “tags.`extra-key` = 'value'“
 	//
-	// Supported operators are ``=``, ``!=``, ``LIKE``, and ``ILIKE``.
+	// Supported operators are “=“, “!=“, “LIKE“, and “ILIKE“.
 	Filter *string `protobuf:"bytes,3,opt,name=filter" json:"filter,omitempty"`
 	// List of columns for ordering search results, which can include experiment name and id
 	// with an optional "DESC" or "ASC" annotation, where "ASC" is the default.
@@ -2706,7 +2706,7 @@ type UpdateRun struct {
 	RunUuid *string `protobuf:"bytes,1,opt,name=run_uuid,json=runUuid" json:"run_uuid,omitempty"`
 	// Updated status of the run.
 	Status *RunStatus `protobuf:"varint,2,opt,name=status,enum=mlflow.RunStatus" json:"status,omitempty"`
-	//Unix timestamp in milliseconds of when the run ended.
+	// Unix timestamp in milliseconds of when the run ended.
 	EndTime *int64 `protobuf:"varint,3,opt,name=end_time,json=endTime" json:"end_time,omitempty"`
 	// Updated name of the run.
 	RunName       *string `protobuf:"bytes,5,opt,name=run_name,json=runName" json:"run_name,omitempty"`
@@ -3379,12 +3379,12 @@ type SearchRuns struct {
 	// runs. The syntax is a subset of SQL that supports ANDing together binary operations
 	// between a param, metric, or tag and a constant.
 	//
-	// Example: ``metrics.rmse < 1 and params.model_class = 'LogisticRegression'``
+	// Example: “metrics.rmse < 1 and params.model_class = 'LogisticRegression'“
 	//
 	// You can select columns with special characters (hyphen, space, period, etc.) by using double quotes:
-	// ``metrics."model class" = 'LinearRegression' and tags."user-name" = 'Tomas'``
+	// “metrics."model class" = 'LinearRegression' and tags."user-name" = 'Tomas'“
 	//
-	// Supported operators are ``=``, ``!=``, ``>``, ``>=``, ``<``, and ``<=``.
+	// Supported operators are “=“, “!=“, “>“, “>=“, “<“, and “<=“.
 	Filter *string `protobuf:"bytes,4,opt,name=filter" json:"filter,omitempty"`
 	// Whether to display only active, only deleted, or all runs.
 	// Defaults to only active runs.
@@ -5112,11 +5112,11 @@ type SearchTraces struct {
 	ExperimentIds []string `protobuf:"bytes,1,rep,name=experiment_ids,json=experimentIds" json:"experiment_ids,omitempty"`
 	// A filter expression over trace attributes and tags that allows returning a subset of
 	// traces. The syntax is a subset of SQL that supports ANDing together binary operations
-	// Example: ``trace.status = 'OK' and trace.timestamp_ms > 1711089570679``.
+	// Example: “trace.status = 'OK' and trace.timestamp_ms > 1711089570679“.
 	Filter *string `protobuf:"bytes,2,opt,name=filter" json:"filter,omitempty"`
 	// Maximum number of traces desired. Max threshold is 500.
 	MaxResults *int32 `protobuf:"varint,3,opt,name=max_results,json=maxResults,def=100" json:"max_results,omitempty"`
-	// List of columns for ordering the results, e.g. ``["timestamp_ms DESC"]``.
+	// List of columns for ordering the results, e.g. “["timestamp_ms DESC"]“.
 	OrderBy []string `protobuf:"bytes,4,rep,name=order_by,json=orderBy" json:"order_by,omitempty"`
 	// Token indicating the page of traces to fetch.
 	PageToken     *string `protobuf:"bytes,5,opt,name=page_token,json=pageToken" json:"page_token,omitempty"`
@@ -5202,11 +5202,11 @@ type SearchUnifiedTraces struct {
 	ExperimentIds []string `protobuf:"bytes,3,rep,name=experiment_ids,json=experimentIds" json:"experiment_ids,omitempty"`
 	// A filter expression over trace attributes and tags that allows returning a subset of
 	// traces. The syntax is a subset of SQL that supports ANDing together binary operations
-	// Example: ``trace.status = 'OK' and trace.timestamp_ms > 1711089570679``.
+	// Example: “trace.status = 'OK' and trace.timestamp_ms > 1711089570679“.
 	Filter *string `protobuf:"bytes,4,opt,name=filter" json:"filter,omitempty"`
 	// Maximum number of traces desired. Max threshold is 500.
 	MaxResults *int32 `protobuf:"varint,5,opt,name=max_results,json=maxResults,def=100" json:"max_results,omitempty"`
-	// List of columns for ordering the results, e.g. ``["timestamp_ms DESC"]``.
+	// List of columns for ordering the results, e.g. “["timestamp_ms DESC"]“.
 	OrderBy []string `protobuf:"bytes,6,rep,name=order_by,json=orderBy" json:"order_by,omitempty"`
 	// Token indicating the page of traces to fetch. This is a unified token that encodes both online and offline traces
 	// tokens.
@@ -6277,12 +6277,12 @@ type TraceInfoV3 struct {
 	State             *TraceInfoV3_State   `protobuf:"varint,8,opt,name=state,enum=mlflow.TraceInfoV3_State" json:"state,omitempty"`
 	// Metadata associated with the trace.
 	// Examples include:
-	// - run_id: The ID of the mlflow Run (i.e. evaluation job) that produced the trace. May not be
-	//           applicable in certain situations such as if the trace was created via interactive vibe checks)
-	// - model_id: The ID of the associated model that produced the trace.
-	// - dataset_id: The ID of the mlflow Dataset (usually used together with dataset_record_id)
-	// - dataset_record_id: The ID of the mlflow Dataset (usually used together with dataset_record_id)
-	// - session_id: The ID of the session (e.g. chat conversation) where the request came from
+	//   - run_id: The ID of the mlflow Run (i.e. evaluation job) that produced the trace. May not be
+	//     applicable in certain situations such as if the trace was created via interactive vibe checks)
+	//   - model_id: The ID of the associated model that produced the trace.
+	//   - dataset_id: The ID of the mlflow Dataset (usually used together with dataset_record_id)
+	//   - dataset_record_id: The ID of the mlflow Dataset (usually used together with dataset_record_id)
+	//   - session_id: The ID of the session (e.g. chat conversation) where the request came from
 	TraceMetadata map[string]string           `protobuf:"bytes,9,rep,name=trace_metadata,json=traceMetadata" json:"trace_metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Assessments   []*assessmentspb.Assessment `protobuf:"bytes,10,rep,name=assessments" json:"assessments,omitempty"`
 	// Mutable, user-defined tags for the trace, e.g. "question_topic": "DBSQL"
@@ -6927,7 +6927,7 @@ type SearchLoggedModels struct {
 	ExperimentIds []string `protobuf:"bytes,1,rep,name=experiment_ids,json=experimentIds" json:"experiment_ids,omitempty"`
 	// A filter expression over Logged Model info and data that allows returning a subset of
 	// Logged Models. The syntax is a subset of SQL that supports ANDing together binary operations
-	// Example: ``params.alpha < 0.3 AND metrics.accuracy > 0.9``.
+	// Example: “params.alpha < 0.3 AND metrics.accuracy > 0.9“.
 	Filter *string `protobuf:"bytes,2,opt,name=filter" json:"filter,omitempty"`
 	// List of datasets on which to apply the metrics filter clauses.
 	// For example, a filter with `metrics.accuracy > 0.9` and dataset info with name "test_dataset"
@@ -7685,11 +7685,11 @@ type SearchTracesV3 struct {
 	Locations []*TraceLocation `protobuf:"bytes,1,rep,name=locations" json:"locations,omitempty"`
 	// A filter expression over trace attributes and tags that allows returning a subset of
 	// traces. The syntax is a subset of SQL that supports ANDing together binary operations
-	// Example: ``trace.status = 'OK' and trace.timestamp_ms > 1711089570679``.
+	// Example: “trace.status = 'OK' and trace.timestamp_ms > 1711089570679“.
 	Filter *string `protobuf:"bytes,2,opt,name=filter" json:"filter,omitempty"`
 	// Maximum number of traces desired. Max threshold is 500.
 	MaxResults *int32 `protobuf:"varint,3,opt,name=max_results,json=maxResults,def=100" json:"max_results,omitempty"`
-	// List of columns for ordering the results, e.g. ``["timestamp_ms DESC"]``.
+	// List of columns for ordering the results, e.g. “["timestamp_ms DESC"]“.
 	OrderBy []string `protobuf:"bytes,4,rep,name=order_by,json=orderBy" json:"order_by,omitempty"`
 	// Token indicating the page of traces to fetch.
 	PageToken     *string `protobuf:"bytes,5,opt,name=page_token,json=pageToken" json:"page_token,omitempty"`
@@ -8900,7 +8900,7 @@ type GatewaySecretInfo struct {
 	SecretName *string `protobuf:"bytes,2,opt,name=secret_name,json=secretName" json:"secret_name,omitempty"`
 	// Masked version of the secret values for display as key-value pairs.
 	// For simple API keys: {"api_key": "sk-...xyz123"}
-	// For compound credentials: ``{"aws_access_key_id": "AKI...1234", "aws_secret_access_key": "***"}``
+	// For compound credentials: “{"aws_access_key_id": "AKI...1234", "aws_secret_access_key": "***"}“
 	MaskedValues map[string]string `protobuf:"bytes,3,rep,name=masked_values,json=maskedValues" json:"masked_values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Timestamp (milliseconds since epoch) when the secret was created
 	CreatedAt *int64 `protobuf:"varint,4,opt,name=created_at,json=createdAt" json:"created_at,omitempty"`
@@ -15507,13 +15507,13 @@ type SearchLoggedModels_OrderBy struct {
 	FieldName *string `protobuf:"bytes,1,opt,name=field_name,json=fieldName" json:"field_name,omitempty"`
 	// Whether the order is ascending or not.
 	Ascending *bool `protobuf:"varint,2,opt,name=ascending,def=1" json:"ascending,omitempty"`
-	// If ``field_name`` refers to a metric, this field specifies the name of the dataset
+	// If “field_name“ refers to a metric, this field specifies the name of the dataset
 	// associated with the metric. Only metrics associated with the specified dataset name will be
-	// considered for ordering. This field may only be set if ``field_name`` refers to a metric.
+	// considered for ordering. This field may only be set if “field_name“ refers to a metric.
 	DatasetName *string `protobuf:"bytes,3,opt,name=dataset_name,json=datasetName" json:"dataset_name,omitempty"`
-	// If ``field_name`` refers to a metric, this field specifies the digest of the dataset
+	// If “field_name“ refers to a metric, this field specifies the digest of the dataset
 	// associated with the metric. Only metrics associated with the specified dataset name
-	// and digest will be considered for ordering. This field may only be set if ``dataset_name``
+	// and digest will be considered for ordering. This field may only be set if “dataset_name“
 	// is also set.
 	DatasetDigest *string `protobuf:"bytes,4,opt,name=dataset_digest,json=datasetDigest" json:"dataset_digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
