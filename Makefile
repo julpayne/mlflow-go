@@ -2,7 +2,7 @@
 
 # Configuration
 # Also update MLFLOW_VERSION in .github/workflows/go.yaml when changing this
-MLFLOW_VERSION ?= 3.9.0
+MLFLOW_VERSION ?= 3.16.1
 # To run against Red Hat midstream (opendatahub-io/mlflow), use: make dev/up-midstream
 # Change MLFLOW_MIDSTREAM_REF to a tag (e.g., v3.9.0-rh1) when available
 MLFLOW_MIDSTREAM_REF ?= master
@@ -14,8 +14,8 @@ LOCALBIN ?= $(shell pwd)/bin
 UV ?= $(LOCALBIN)/uv
 PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.1.6
-PROTOC_GEN_GO_VERSION ?= v1.36.11
+GOLANGCI_LINT_VERSION ?= v2.14.0
+PROTOC_GEN_GO_VERSION ?= v1.36.12
 
 # PostgreSQL configuration
 POSTGRES_CONTAINER ?= mlflow-postgres
