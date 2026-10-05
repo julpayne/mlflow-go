@@ -293,7 +293,7 @@ dev/postgres-down:
 
 dev/up-postgres: $(UV)
 	@echo "Starting MLflow server with PostgreSQL backend on port $(MLFLOW_PORT)..."
-	$(UV) run --with "$(MLFLOW_WITH)" --with psycopg2-binary mlflow server \
+	$(UV) run --with "$(MLFLOW_WITH)" --with psycopg2-binary --with "psycopg[binary]" mlflow server \
 		--host 127.0.0.1 \
 		--port $(MLFLOW_PORT) \
 		--backend-store-uri $(POSTGRES_URI)
@@ -326,7 +326,7 @@ test/integration-ci-postgres: $(UV)
 		sleep 2; \
 	done
 	@echo "Starting MLflow test server on port $(MLFLOW_TEST_PORT) with PostgreSQL backend..."
-	@$(UV) run --with "$(MLFLOW_WITH)" --with psycopg2-binary mlflow server \
+	@$(UV) run --with "$(MLFLOW_WITH)" --with psycopg2-binary --with "psycopg[binary]" mlflow server \
 		--host 127.0.0.1 \
 		--port $(MLFLOW_TEST_PORT) \
 		--backend-store-uri postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(MLFLOW_TEST_POSTGRES_PORT)/$(POSTGRES_DB) &
