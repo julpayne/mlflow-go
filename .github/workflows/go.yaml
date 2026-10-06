@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  MLFLOW_VERSION: "3.16.1"
+  MLFLOW_VERSION: "3.15.2"
   MLFLOW_MIDSTREAM_REF: "master"
   # Pinned protoc. The compiler version is stamped into the header of every
   # generated *.pb.go (36.2 is emitted as "protoc v7.36.2"), so an unpinned

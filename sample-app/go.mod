@@ -1,6 +1,6 @@
 module sample-app
 
-go 1.24.3
+go 1.26.7
 
 require github.com/opendatahub-io/mlflow-go v0.0.0
 
