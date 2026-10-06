@@ -14,8 +14,8 @@ LOCALBIN ?= $(shell pwd)/bin
 UV ?= $(LOCALBIN)/uv
 PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
-# Keep this on a release built with the Go toolchain in go.mod.
-GOLANGCI_LINT_VERSION ?= v2.9.0
+# Keep this on the newest release supported by the Go toolchain in go.mod.
+GOLANGCI_LINT_VERSION ?= v2.14.0
 PROTOC_GEN_GO_VERSION ?= v1.36.12
 
 # PostgreSQL configuration
