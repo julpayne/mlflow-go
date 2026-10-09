@@ -331,7 +331,7 @@ test/integration-ci-postgres: $(UV)
 	@$(UV) run --with "$(MLFLOW_WITH)" --with psycopg2-binary mlflow server \
 		--host 127.0.0.1 \
 		--port $(MLFLOW_TEST_PORT) \
-		--backend-store-uri postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(MLFLOW_TEST_POSTGRES_PORT)/$(POSTGRES_DB) &
+		--backend-store-uri "postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(MLFLOW_TEST_POSTGRES_PORT)/$(POSTGRES_DB)" &
 	@echo "Waiting for MLflow to be ready..."
 	@READY=0; for i in $$(seq 1 30); do \
 		if curl -s http://localhost:$(MLFLOW_TEST_PORT)/health > /dev/null 2>&1; then \
