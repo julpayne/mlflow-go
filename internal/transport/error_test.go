@@ -357,10 +357,37 @@ func TestAbsoluteErrorRequestHeaderRedaction(t *testing.T) {
 	}
 }
 
+func TestErrorRequestMetadataPreserved(t *testing.T) {
+	for _, name := range []string{
+		"Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
+		"Content-Type", "Content-Length", "Content-Encoding", "Content-Language",
+		workspaceHeader,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Use lowercase keys too: callers may construct Header directly.
+			request := &http.Request{Header: http.Header{strings.ToLower(name): {"a"}}}
+			client := &Client{}
+			for _, body := range []string{
+				`{"error_code":"ALIAS_CONFLICT","message":"alias application/json"}`,
+				"alias application/json",
+			} {
+				apiErr := client.parseError(http.StatusConflict, []byte(body), request).(*internalerrors.APIError)
+				if !strings.Contains(apiErr.Message, "alias application/json") || strings.Contains(apiErr.Message, "[REDACTED]") {
+					t.Fatalf("request metadata redacted ordinary text: %#v", apiErr)
+				}
+				if strings.HasPrefix(body, "{") && !internalerrors.IsAliasConflict(fmt.Errorf("caller: %w", apiErr)) {
+					t.Fatalf("known transport lost alias-conflict classification: %#v", apiErr)
+				}
+			}
+		})
+	}
+}
+
 func TestOpaqueTransportConflictClassification(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		fmt.Fprint(w, `{"error_code":"RESOURCE_ALREADY_EXISTS","message":"resource exists"}`)
+		// A credential could itself look like a valid MLflow conflict code.
+		fmt.Fprint(w, `{"error_code":"ALIAS_CONFLICT","message":"resource has aliases"}`)
 	}))
 	defer server.Close()
 	client, err := New(Config{

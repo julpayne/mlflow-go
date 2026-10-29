@@ -902,7 +902,15 @@ func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) 
 	if request != nil {
 		// Per-request artifact headers can carry credentials under arbitrary
 		// names, so apply the same conservative policy as configured headers.
-		for _, values := range request.Header {
+		for name, values := range request.Header {
+			switch http.CanonicalHeaderKey(name) {
+			case "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
+				"Content-Type", "Content-Length", "Content-Encoding", "Content-Language",
+				http.CanonicalHeaderKey(workspaceHeader):
+				// These headers describe the representation or workspace,
+				// rather than credentials. Unknown headers remain sensitive.
+				continue
+			}
 			for _, value := range values {
 				addHeader(value)
 			}
