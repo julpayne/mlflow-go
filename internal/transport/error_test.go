@@ -2,15 +2,11 @@ package transport
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -76,348 +72,83 @@ func TestHTTPErrorBodies(t *testing.T) {
 	}
 }
 
-func TestErrorBodyRedaction(t *testing.T) {
-	origin, err := url.Parse("https://tracking.example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tt := range []struct {
-		name    string
-		headers map[string]string
-		rt      http.RoundTripper
-		body    string
-		want    string
-	}{
-		{"configured header", map[string]string{"X-API-Key": "header-secret"}, nil, "denied header-secret", `Forbidden: response body "denied [REDACTED]"`},
-		{"bearer header", map[string]string{"Authorization": "Bearer bearer-secret"}, nil, "denied bearer-secret", `Forbidden: response body "denied [REDACTED]"`},
-		{"static bearer", nil, NewTokenRoundTripper(http.DefaultTransport, "token-secret", origin), "denied token-secret", `Forbidden: response body "denied [REDACTED]"`},
-		{"static basic", nil, NewTokenRoundTripper(http.DefaultTransport, "alice:password-secret", origin), "denied alice:password-secret " + base64.StdEncoding.EncodeToString([]byte("alice:password-secret")) + " password-secret", `Forbidden: response body "denied [REDACTED] [REDACTED] [REDACTED]"`},
-		{"rotating token", nil, NewTokenFileRoundTripper(http.DefaultTransport, "unused-token-file", origin), "denied old-token", "Forbidden"},
-		{"custom transport", nil, roundTripperFunc(func(*http.Request) (*http.Response, error) { panic("unused") }), "denied custom-secret", "Forbidden"},
-		{"JSON escaped header", map[string]string{"X-Key": "secret\"value"}, nil, `{"detail":"secret\"value"}`, `Forbidden: response body "{\"detail\":\"[REDACTED]\"}"`},
-		{"secret crossing limit", map[string]string{"X-Key": "boundary-secret"}, nil, strings.Repeat("x", 4090) + "boundary-secret", "Forbidden: response body " + fmt.Sprintf("%q", strings.Repeat("x", 4090)+"[REDAC") + " (truncated)"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
-			var apiErr *internalerrors.APIError
-			if err := client.parseError(http.StatusForbidden, []byte(tt.body), nil); !errors.As(err, &apiErr) {
-				t.Fatalf("expected APIError, got %v", err)
-			}
-			if apiErr.Message != tt.want {
-				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
-			}
-		})
-	}
-}
-
-func TestStructuredErrorRedaction(t *testing.T) {
-	origin, err := url.Parse("https://tracking.example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tt := range []struct {
-		name, code, message, wantCode, wantMessage string
-		headers                                    map[string]string
-		rt                                         http.RoundTripper
-		request                                    *http.Request
-	}{
-		{name: "ordinary fields", code: "RESOURCE_NOT_FOUND", message: "  missing resource\n", wantCode: "RESOURCE_NOT_FOUND", wantMessage: "  missing resource\n"},
-		{name: "configured header in both fields", headers: map[string]string{"X-Key": "header-secret"}, code: "header-secret", message: "denied header-secret", wantCode: "[REDACTED]", wantMessage: "denied [REDACTED]"},
-		{name: "escaped header", headers: map[string]string{"X-Key": "secret\"value"}, code: "PERMISSION_DENIED", message: "denied secret\"value", wantCode: "PERMISSION_DENIED", wantMessage: "denied [REDACTED]"},
-		{name: "static bearer", rt: NewTokenRoundTripper(http.DefaultTransport, "bearer-secret", origin), code: "bearer-secret", message: "denied Bearer bearer-secret", wantCode: "[REDACTED]", wantMessage: "denied [REDACTED]"},
-		{name: "basic components", rt: NewTokenRoundTripper(http.DefaultTransport, "alice:password-secret", origin), code: "PERMISSION_DENIED", message: "denied alice:password-secret password-secret", wantCode: "PERMISSION_DENIED", wantMessage: "denied [REDACTED] [REDACTED]"},
-		{name: "explicit request authorization", request: &http.Request{Header: http.Header{"Authorization": {"Bearer caller-secret"}}}, code: "caller-secret", message: "denied caller-secret", wantCode: "[REDACTED]", wantMessage: "denied [REDACTED]"},
-		{name: "token file without request", rt: NewTokenFileRoundTripper(http.DefaultTransport, "unused", origin), code: "unknown-secret", message: "denied unknown-secret", wantMessage: "Forbidden"},
-		{name: "opaque transport", rt: roundTripperFunc(func(*http.Request) (*http.Response, error) { panic("unused") }), code: "unknown-secret", message: "denied unknown-secret", wantMessage: "Forbidden"},
-		{name: "code with empty message", headers: map[string]string{"X-Key": "header-secret"}, code: "header-secret", wantCode: "[REDACTED]", wantMessage: `Forbidden: response body "{\"error_code\":\"[REDACTED]\",\"message\":\"\"}"`},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			body, err := json.Marshal(map[string]string{"error_code": tt.code, "message": tt.message})
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
-			var apiErr *internalerrors.APIError
-			if err := client.parseError(http.StatusForbidden, body, tt.request); !errors.As(err, &apiErr) {
-				t.Fatalf("expected APIError, got %v", err)
-			}
-			if apiErr.Code != tt.wantCode || apiErr.Message != tt.wantMessage || apiErr.StatusCode != http.StatusForbidden {
-				t.Fatalf("APIError = %#v, want code %q, message %q, status 403", apiErr, tt.wantCode, tt.wantMessage)
-			}
-		})
-	}
-}
-
 func TestErrorBodyExcerptBound(t *testing.T) {
 	client := &Client{}
 	// The final multi-byte character straddles the byte limit.
-	err := client.parseError(http.StatusForbidden, []byte(strings.Repeat("x", 4095)+strings.Repeat("界", 10000)), nil)
+	err := client.parseError(http.StatusForbidden, []byte(strings.Repeat("x", 4095)+strings.Repeat("界", 10000)))
 	if len(err.Error()) > 4200 || !strings.Contains(err.Error(), "(truncated)") || !utf8.ValidString(err.Error()) {
 		t.Fatalf("fallback must be bounded, marked truncated, and valid UTF-8: length %d", len(err.Error()))
 	}
 	// Quoting can expand each byte by up to four characters, but stays bounded.
-	err = client.parseError(599, []byte(strings.Repeat("\x00", 10000)), nil)
+	err = client.parseError(599, []byte(strings.Repeat("\x00", 10000)))
 	if len(err.Error()) > 16500 || !strings.Contains(err.Error(), "HTTP request failed") {
 		t.Fatalf("unexpected fallback for unknown status: length %d", len(err.Error()))
 	}
 }
 
-func TestErrorBodyProductionTransports(t *testing.T) {
-	const secret = "production-secret"
-	tokenPath := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == serverInfoPath {
-			fmt.Fprint(w, `{"workspaces_enabled":true}`)
-			return
-		}
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintf(w, "denied %s", r.Header.Get("Authorization"))
-	}))
-	defer server.Close()
-	custom := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		r = r.Clone(r.Context())
-		r.Header.Set("Authorization", "Bearer "+secret)
-		return http.DefaultTransport.RoundTrip(r)
-	})
-	for _, tt := range []struct {
+// A custom transport need not expose its internals to preserve server details.
+// Exercise every shared error-parsing path, including a foreign URL with a query
+// value that cannot be decoded and a response without Response.Request.
+func TestCustomTransportErrorDetails(t *testing.T) {
+	ctx := context.Background()
+	const absoluteURL = "https://storage.example/object?opaque=%zz"
+	operations := []struct {
 		name string
-		cfg  Config
-		want string
+		call func(*Client) error
 	}{
-		{"default", Config{}, `Forbidden: response body "denied"`},
-		{"insecure", Config{Insecure: true}, `Forbidden: response body "denied"`},
-		{"nil client transport", Config{HTTPClient: &http.Client{}}, `Forbidden: response body "denied"`},
-		{"explicit HTTP transport", Config{HTTPClient: server.Client()}, `Forbidden: response body "denied"`},
-		{"workspace", Config{Workspace: "test"}, `Forbidden: response body "denied"`},
-		{"static token", Config{Token: secret}, `Forbidden: response body "denied [REDACTED]"`},
-		{"workspace and static token", Config{Workspace: "test", WorkspacesSupport: true, Token: secret}, `Forbidden: response body "denied [REDACTED]"`},
-		{"token file", Config{TokenPath: tokenPath}, `Forbidden: response body "denied [REDACTED]"`},
-		{"workspace and token file", Config{Workspace: "test", TokenPath: tokenPath}, `Forbidden: response body "denied [REDACTED]"`},
-		{"custom transport", Config{HTTPClient: &http.Client{Transport: custom}}, "Forbidden"},
-		{"workspace and custom transport", Config{Workspace: "test", Token: secret, HTTPClient: &http.Client{Transport: custom}}, "Forbidden"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := tt.cfg
-			cfg.BaseURL = server.URL
-			client, err := New(cfg)
-			if err != nil {
-				t.Fatal(err)
+		{"JSON", func(c *Client) error { return c.Get(ctx, "/error", nil, nil) }},
+		{"bytes", func(c *Client) error { _, _, err := c.GetBytes(ctx, "/error", nil); return err }},
+		{"upload", func(c *Client) error { return c.PutReader(ctx, "/error", strings.NewReader("data"), "text/plain") }},
+		{"download", func(c *Client) error {
+			body, err := c.GetBodyStream(ctx, "/error", nil)
+			if body != nil {
+				body.Close()
 			}
-			var apiErr *internalerrors.APIError
-			if err := client.Get(context.Background(), "/error", nil, nil); !errors.As(err, &apiErr) {
-				t.Fatalf("expected APIError, got %v", err)
+			return err
+		}},
+		{"absolute", func(c *Client) error {
+			_, _, err := c.DoAbsolute(ctx, http.MethodGet, absoluteURL, nil, nil)
+			return err
+		}},
+		{"absolute download", func(c *Client) error {
+			body, err := c.DoAbsoluteGetBody(ctx, absoluteURL, nil)
+			if body != nil {
+				body.Close()
 			}
-			if apiErr.Message != tt.want {
-				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
-			}
-		})
+			return err
+		}},
 	}
-}
-
-func TestErrorBodyTokenFileRotation(t *testing.T) {
-	const secret = "request-token-secret"
-	tokenPath := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Rotate before parsing the response so rereading the file would miss
-		// the credential reflected by this request.
-		if err := os.WriteFile(tokenPath, []byte("rotated-token"), 0600); err != nil {
-			t.Error(err)
-		}
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintf(w, "denied %s", r.Header.Get("Authorization"))
-	}))
-	defer server.Close()
-	client, err := New(Config{BaseURL: server.URL, TokenPath: tokenPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var apiErr *internalerrors.APIError
-	if err := client.Get(context.Background(), "/error", nil, nil); !errors.As(err, &apiErr) {
-		t.Fatalf("expected APIError, got %v", err)
-	}
-	if want := `Forbidden: response body "denied [REDACTED]"`; apiErr.Message != want {
-		t.Fatalf("Message = %q, want %q", apiErr.Message, want)
-	}
-}
-
-func TestBoundedRedactedExcerpt(t *testing.T) {
 	for _, tt := range []struct {
-		name, body, secret string
+		name, body, code, message string
 	}{
-		{"expanding replacements", strings.Repeat("s", 10000), "s"},
-		{"contracting replacements", strings.Repeat(strings.Repeat("s", 100), 10000), strings.Repeat("s", 100)},
-		{"crossing limit", strings.Repeat("x", 4090) + "secret", "secret"},
-		{"leading whitespace in secret", " secret", " secret"},
-		{"trailing whitespace in secret", "secret ", "secret "},
-		{"only whitespace", strings.Repeat("\u2003", 10000), "secret"},
-		{"long trailing whitespace", "denied" + strings.Repeat(" ", 10000), "secret"},
-		{"long trailing Unicode whitespace", "denied" + strings.Repeat("\u2003", 10000), "secret"},
-		{"whitespace before later text", "denied" + strings.Repeat(" ", 10000) + "end", "secret"},
-		{"Unicode boundary", strings.Repeat("界", 10000), "secret"},
+		{"structured", `{"error_code":"RESOURCE_ALREADY_EXISTS","message":"Experiment 'evalhub-exp' already exists (team true, user 1)"}`, "RESOURCE_ALREADY_EXISTS", "Experiment 'evalhub-exp' already exists (team true, user 1)"},
+		{"nonstandard", `{"detail":"evalhub true 1 denied"}`, "", `Bad Request: response body "{\"detail\":\"evalhub true 1 denied\"}"`},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			// Compare bounded processing with the full-body reference behavior.
-			want := strings.TrimSpace(strings.ReplaceAll(tt.body, tt.secret, "[REDACTED]"))
-			truncated := len(want) > 4096
-			if truncated {
-				want = want[:4096]
-			}
-			got, gotTruncated := boundedRedactedExcerpt([]byte(tt.body), []string{tt.secret})
-			if got != want || gotTruncated != truncated {
-				t.Fatalf("excerpt mismatch: length %d, truncated %v; want length %d, truncated %v", len(got), gotTruncated, len(want), truncated)
-			}
-		})
-	}
-}
-
-func TestStructuredErrorTokenFileRotation(t *testing.T) {
-	const secret = "original-request-token"
-	tokenPath := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := os.WriteFile(tokenPath, []byte("rotated-token"), 0600); err != nil {
-			t.Error(err)
-		}
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error_code": strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
-			"message":    "denied " + r.Header.Get("Authorization"),
-		})
-	}))
-	defer server.Close()
-	client, err := New(Config{BaseURL: server.URL, TokenPath: tokenPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var apiErr *internalerrors.APIError
-	err = client.Get(context.Background(), "/error", nil, nil)
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("expected APIError, got %v", err)
-	}
-	if apiErr.Code != "[REDACTED]" || apiErr.Message != "denied [REDACTED]" || strings.Contains(err.Error(), secret) {
-		t.Fatalf("unexpected error: %#v", apiErr)
-	}
-}
-
-func TestAbsoluteErrorRequestHeaderRedaction(t *testing.T) {
-	for _, streaming := range []bool{false, true} {
-		for _, structured := range []bool{false, true} {
-			t.Run(fmt.Sprintf("streaming=%t/structured=%t", streaming, structured), func(t *testing.T) {
-				t.Parallel()
-				const apiKey = "per-request-api-key"
-				const storageToken = "per-request-storage-token"
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Header.Get("X-API-Key") != apiKey || r.Header.Get("X-Amz-Security-Token") != storageToken {
-						t.Error("missing per-request credentials")
-					}
-					message := "denied " + r.Header.Get("X-API-Key") + " " + r.Header.Get("X-Amz-Security-Token")
-					w.WriteHeader(http.StatusForbidden)
-					if structured {
-						_ = json.NewEncoder(w).Encode(map[string]string{"error_code": r.Header.Get("X-API-Key"), "message": message})
-					} else {
-						fmt.Fprint(w, message)
-					}
-				}))
-				defer server.Close()
-				// Artifact requests use a different origin from the tracking server.
-				client, err := New(Config{BaseURL: "https://tracking.example"})
+		for _, operation := range operations {
+			t.Run(tt.name+"/"+operation.name, func(t *testing.T) {
+				client, err := New(Config{
+					BaseURL: "https://tracking.example",
+					Headers: map[string]string{"X-Client": "evalhub", "X-Debug": "true", "Authorization": "Basic MTox", "Cookie": "flag=1"},
+					HTTPClient: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+						return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tt.body))}, nil
+					})},
+				})
 				if err != nil {
 					t.Fatal(err)
 				}
-				headers := map[string]string{"X-API-Key": apiKey, "X-Amz-Security-Token": storageToken}
-				if streaming {
-					body, requestErr := client.DoAbsoluteGetBody(context.Background(), server.URL, headers)
-					if body != nil {
-						body.Close()
-					}
-					err = requestErr
-				} else {
-					_, _, err = client.DoAbsolute(context.Background(), http.MethodGet, server.URL, headers, nil)
+				err = operation.call(client)
+				apiErr, ok := err.(*internalerrors.APIError)
+				if !ok {
+					t.Fatalf("expected direct *APIError, got %T: %v", err, err)
 				}
-				var apiErr *internalerrors.APIError
-				if !errors.As(err, &apiErr) {
-					t.Fatalf("expected APIError, got %v", err)
+				if apiErr.StatusCode != http.StatusBadRequest || apiErr.Code != tt.code || apiErr.Message != tt.message {
+					t.Fatalf("lost error details: %#v", apiErr)
 				}
-				wantCode, wantMessage := "", `Forbidden: response body "denied [REDACTED] [REDACTED]"`
-				if structured {
-					wantCode, wantMessage = "[REDACTED]", "denied [REDACTED] [REDACTED]"
-				}
-				if apiErr.StatusCode != http.StatusForbidden || apiErr.Code != wantCode || apiErr.Message != wantMessage {
-					t.Fatalf("APIError = %#v, want status 403, code %q, message %q", apiErr, wantCode, wantMessage)
-				}
-				for _, secret := range []string{apiKey, storageToken} {
-					if strings.Contains(err.Error(), secret) {
-						t.Errorf("error exposes per-request credential %q", secret)
-					}
+				wrapped := fmt.Errorf("caller: %w", err)
+				if !errors.Is(wrapped, apiErr) || internalerrors.IsAlreadyExists(wrapped) != (tt.code == "RESOURCE_ALREADY_EXISTS") {
+					t.Fatalf("error identity/classification changed: %v", wrapped)
 				}
 			})
 		}
-	}
-}
-
-func TestErrorRequestMetadataPreserved(t *testing.T) {
-	for _, name := range []string{
-		"Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
-		"Content-Type", "Content-Length", "Content-Encoding", "Content-Language",
-		workspaceHeader,
-	} {
-		t.Run(name, func(t *testing.T) {
-			// Use lowercase keys too: callers may construct Header directly.
-			request := &http.Request{Header: http.Header{strings.ToLower(name): {"a"}}}
-			client := &Client{headers: map[string]string{strings.ToLower(name): "a"}}
-			for _, body := range []string{
-				`{"error_code":"ALIAS_CONFLICT","message":"alias application/json"}`,
-				"alias application/json",
-			} {
-				apiErr := client.parseError(http.StatusConflict, []byte(body), request).(*internalerrors.APIError)
-				if !strings.Contains(apiErr.Message, "alias application/json") || strings.Contains(apiErr.Message, "[REDACTED]") {
-					t.Fatalf("request metadata redacted ordinary text: %#v", apiErr)
-				}
-				if strings.HasPrefix(body, "{") && !internalerrors.IsAliasConflict(fmt.Errorf("caller: %w", apiErr)) {
-					t.Fatalf("known transport lost alias-conflict classification: %#v", apiErr)
-				}
-			}
-		})
-	}
-}
-
-func TestOpaqueTransportConflictClassification(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		// A credential could itself look like a valid MLflow conflict code.
-		fmt.Fprint(w, `{"error_code":"ALIAS_CONFLICT","message":"resource has aliases"}`)
-	}))
-	defer server.Close()
-	client, err := New(Config{
-		BaseURL: server.URL,
-		HTTPClient: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			return http.DefaultTransport.RoundTrip(r)
-		})},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = client.Get(context.Background(), "/error", nil, nil)
-	var apiErr *internalerrors.APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("expected APIError, got %v", err)
-	}
-	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "" || apiErr.Message != "Conflict" {
-		t.Fatalf("unexpected redacted APIError: %#v", apiErr)
-	}
-	wrapped := fmt.Errorf("caller: %w", err)
-	if internalerrors.IsAliasConflict(wrapped) {
-		t.Error("redacted conflict must not be classified as an alias conflict")
-	}
-	if !internalerrors.IsAlreadyExists(wrapped) {
-		t.Error("redaction must preserve status-based already-exists classification")
 	}
 }

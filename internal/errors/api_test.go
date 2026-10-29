@@ -292,11 +292,6 @@ func TestIsAliasConflict(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "wrapped transport error with suppressed code",
-			err:      fmt.Errorf("wrapped: %w", WithRedactedCode(&APIError{StatusCode: http.StatusConflict})),
-			expected: false,
-		},
-		{
 			name:     "non-APIError",
 			err:      errors.New("conflict"),
 			expected: false,

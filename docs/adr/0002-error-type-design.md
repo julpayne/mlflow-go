@@ -104,26 +104,15 @@ Define `NotFoundError`, `PermissionError`, etc. as distinct types.
 
 ### Neutral
 
-- Usable server error fields are retained after credential redaction. When a
-  usable message is absent, the SDK supplies HTTP status text and a quoted,
-  redacted response excerpt bounded to 4096 bytes.
-- Redaction covers configured and request credentials, individual cookie values,
-  and query parameter values on foreign hosts (including encoded forms), or when
-  no tracking base URL is available. Representation and
-  workspace headers are metadata and are excluded from credential patterns.
-- Opaque custom transports suppress server codes, messages, and excerpts because
-  their credentials cannot be enumerated. Custom transports may implement the
-  public `mlflow.ErrorRedactionTransport` contract to enumerate every credential
-  used by their entire transport chain for each response request. An incomplete
-  enumeration must return `safe=false`; incorrectly declaring it safe can expose
-  credentials. Enumeration must use request-scoped data and support concurrent
-  requests and token rotation.
-- Suppressed codes cannot drive alias-conflict classification or code-based
-  already-exists recovery. Ordinary code-less HTTP 409 errors retain the original
-  alias-conflict behavior; HTTP status-based classification remains available.
+- Error fields from the server are passed through without translation, for both
+  standard and custom HTTP transports. Fields are decoded independently so an
+  invalid field does not discard another valid field.
+- When no usable message exists, the SDK supplies HTTP status text and a quoted
+  response excerpt bounded to 4096 bytes (before quoting), or an empty-body
+  indication. Error details may contain sensitive server data; applications
+  should consider this before logging them.
 - `APIError.Error()` escapes control and bidirectional-control characters for
-  display without modifying the stored fields. Redaction targets credentials;
-  applications must still treat error details as potentially sensitive server data.
+  display without modifying the stored fields.
 
 ## References
 

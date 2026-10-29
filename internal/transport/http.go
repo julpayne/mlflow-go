@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,29 +11,14 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/opendatahub-io/mlflow-go/internal/errors"
 )
 
 const maxResponseBodySize = 100 << 20 // 100 MiB
-
-// ErrorRedactionTransport is an explicit credential-enumeration contract for
-// custom transports. Implementations must enumerate all credentials used by the
-// entire transport chain for this response request, including credentials added
-// to clones or subsequently removed. Return safe=false if enumeration is incomplete
-// or the request is unavailable. Values must be request-scoped and safe for
-// concurrent use; do not reread rotated token files or use a shared last token.
-// Incorrectly returning safe=true can expose credentials in API errors.
-type ErrorRedactionTransport interface {
-	http.RoundTripper
-	ErrorRedactionCredentials(request *http.Request) (credentials []string, safe bool)
-}
 
 // defaultStreamHeaderTimeout is the fallback deadline for the response-header
 // phase of a streaming transfer when the request context carries no deadline. It
@@ -393,7 +377,7 @@ func (c *Client) PutReader(ctx context.Context, path string, body io.Reader, con
 	// the 3xx response verbatim; accepting it would report a stored-nothing
 	// upload as success.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.parseError(resp.StatusCode, respBody, resp.Request)
+		return c.parseError(resp.StatusCode, respBody)
 	}
 	return nil
 }
@@ -523,7 +507,7 @@ func (c *Client) do(ctx context.Context, method string, reqURL *url.URL, body, r
 
 	// Handle error responses
 	if resp.StatusCode >= 400 {
-		return c.parseError(resp.StatusCode, respBody, resp.Request)
+		return c.parseError(resp.StatusCode, respBody)
 	}
 
 	// Decode successful response
@@ -586,7 +570,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, "", c.parseError(resp.StatusCode, respBody, resp.Request)
+		return nil, "", c.parseError(resp.StatusCode, respBody)
 	}
 
 	return respBody, resp.Header.Get("Content-Type"), nil
@@ -687,7 +671,7 @@ func (c *Client) doRequestBody(req *http.Request) (io.ReadCloser, error) {
 		if readErr != nil {
 			return nil, readErr
 		}
-		return nil, c.parseError(resp.StatusCode, respBody, resp.Request)
+		return nil, c.parseError(resp.StatusCode, respBody)
 	}
 
 	if headerCancel != nil {
@@ -753,7 +737,7 @@ func (c *Client) doAbsolute(ctx context.Context, method, absoluteURL string, hea
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, "", c.parseError(resp.StatusCode, respBody, resp.Request)
+		return nil, "", c.parseError(resp.StatusCode, respBody)
 	}
 
 	return respBody, resp.Header.Get("Content-Type"), nil
@@ -840,7 +824,7 @@ func stripAuthOnCrossOriginRedirect(prev func(*http.Request, []*http.Request) er
 	}
 }
 
-func (c *Client) parseError(statusCode int, body []byte, request *http.Request) error {
+func (c *Client) parseError(statusCode int, body []byte) error {
 	apiErr := &errors.APIError{StatusCode: statusCode}
 	// Gate on a JSON object, and decode fields independently: a non-string
 	// message must not discard a valid MLflow error code (or vice versa).
@@ -853,33 +837,23 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 			apiErr.Message = ""
 		}
 	}
-	patterns, safe := c.errorRedactionPatterns(request)
-	codeRedacted := !safe
-	if safe {
-		replacements := make([]string, 0, 2*len(patterns))
-		for _, pattern := range patterns {
-			replacements = append(replacements, pattern, "[REDACTED]")
-		}
-		replacer := strings.NewReplacer(replacements...)
-		code := replacer.Replace(apiErr.Code)
-		codeRedacted = code != apiErr.Code
-		apiErr.Code = code
-		apiErr.Message = replacer.Replace(apiErr.Message)
-	} else {
-		// Opaque transports may inject credentials we cannot enumerate.
-		apiErr.Code, apiErr.Message = "", ""
-	}
 	if strings.TrimSpace(apiErr.Message) == "" {
 		apiErr.Message = http.StatusText(statusCode)
 		if apiErr.Message == "" {
 			apiErr.Message = "HTTP request failed"
 		}
-		if !safe {
-			return errors.WithRedactedCode(apiErr)
-		}
-		excerpt, truncated := boundedRedactedExcerpt(body, patterns)
+		// Proxies and providers can return arbitrary JSON, HTML, or plain text.
+		// Include only a bounded body excerpt; do not append request or response
+		// headers or client configuration. Server bodies may contain sensitive
+		// data. Quote the excerpt so it cannot inject log lines.
+		const maxErrorBodyExcerpt = 4096
+		excerpt := bytes.TrimSpace(body)
 		if len(excerpt) > 0 {
-			apiErr.Message += fmt.Sprintf(": response body %q", strings.ToValidUTF8(excerpt, "\uFFFD"))
+			truncated := len(excerpt) > maxErrorBodyExcerpt
+			if truncated {
+				excerpt = excerpt[:maxErrorBodyExcerpt]
+			}
+			apiErr.Message += fmt.Sprintf(": response body %q", strings.ToValidUTF8(string(excerpt), "\uFFFD"))
 			if truncated {
 				apiErr.Message += " (truncated)"
 			}
@@ -887,172 +861,5 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 			apiErr.Message += ": empty response body"
 		}
 	}
-	if codeRedacted {
-		return errors.WithRedactedCode(apiErr)
-	}
 	return apiErr
-}
-
-func nonCredentialHeader(name string) bool {
-	switch http.CanonicalHeaderKey(name) {
-	case "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
-		"Content-Type", "Content-Length", "Content-Encoding", "Content-Language",
-		http.CanonicalHeaderKey(workspaceHeader):
-		return true
-	}
-	return false
-}
-
-// errorRedactionPatterns fails closed when the transport can supply credentials we
-// cannot enumerate. Use the response request rather than rereading token files,
-// which may have rotated since the request was sent.
-func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) {
-	var secrets []string
-	addHeader := func(name, value string) {
-		if nonCredentialHeader(name) {
-			return
-		}
-		secrets = append(secrets, value, strings.TrimSpace(value))
-		if strings.EqualFold(name, "Cookie") {
-			r := &http.Request{Header: http.Header{"Cookie": {value}}}
-			for _, cookie := range r.Cookies() {
-				secrets = append(secrets, cookie.Value)
-			}
-		}
-		if scheme, credential, ok := strings.Cut(value, " "); ok {
-			if strings.EqualFold(scheme, "Bearer") || strings.EqualFold(scheme, "Basic") {
-				secrets = append(secrets, credential)
-			}
-			if strings.EqualFold(scheme, "Basic") {
-				if decoded, err := base64.StdEncoding.DecodeString(credential); err == nil {
-					secrets = append(secrets, string(decoded))
-					if user, password, ok := strings.Cut(string(decoded), ":"); ok {
-						secrets = append(secrets, user, password)
-					}
-				}
-			}
-		}
-	}
-	for name, value := range c.headers {
-		addHeader(name, value)
-	}
-	if request != nil {
-		// Per-request artifact headers can carry credentials under arbitrary
-		// names, so apply the same conservative policy as configured headers.
-		for name, values := range request.Header {
-			for _, value := range values {
-				addHeader(name, value)
-			}
-		}
-		if request.URL != nil && (c.baseURL == nil || !strings.EqualFold(request.URL.Host, c.baseURL.Host)) {
-			// Unknown query parameters may authenticate foreign-host presigned storage URLs.
-			// Keep the exact wire spelling as well as decoded/encoded forms.
-			for _, part := range strings.Split(request.URL.RawQuery, "&") {
-				_, raw, ok := strings.Cut(part, "=")
-				if !ok {
-					continue
-				}
-				value, err := url.QueryUnescape(raw)
-				if err != nil {
-					return nil, false
-				}
-				secrets = append(secrets, raw, value, url.QueryEscape(value), url.PathEscape(value))
-			}
-		}
-	}
-	var rt http.RoundTripper
-	if c.httpClient != nil {
-		rt = c.httpClient.Transport
-	}
-	if rt == nil {
-		rt = http.DefaultTransport
-	}
-	for {
-		switch t := rt.(type) {
-		case *WorkspaceRoundTripper:
-			rt = t.base
-		case *tokenRoundTripper:
-			addHeader("Authorization", t.authValue)
-			rt = t.base
-		case *tokenFileRoundTripper:
-			if request == nil {
-				return nil, false
-			}
-			rt = t.base
-		case *http.Transport:
-			return redactionPatterns(secrets)
-		case ErrorRedactionTransport:
-			if request == nil {
-				return nil, false
-			}
-			credentials, safe := t.ErrorRedactionCredentials(request)
-			if !safe {
-				return nil, false
-			}
-			return redactionPatterns(append(secrets, credentials...))
-		default:
-			return nil, false
-		}
-	}
-}
-
-func redactionPatterns(secrets []string) ([]string, bool) {
-	var patterns []string
-	for _, secret := range secrets {
-		if secret == "" {
-			continue
-		}
-		patterns = append(patterns, secret)
-		// JSON providers may reflect an escaped credential value.
-		encoded, err := json.Marshal(secret)
-		if err != nil {
-			return nil, false
-		}
-		patterns = append(patterns, string(encoded[1:len(encoded)-1]))
-	}
-	// Prefer full credentials over shorter overlapping components.
-	sort.Slice(patterns, func(i, j int) bool { return len(patterns[i]) > len(patterns[j]) })
-	return patterns, true
-}
-
-// boundedRedactedExcerpt matches complete secrets before emitting any bytes and
-// stops once the trimmed, redacted output exceeds the limit. Trailing whitespace
-// may require scanning farther, but output storage stays bounded.
-func boundedRedactedExcerpt(body []byte, patterns []string) (string, bool) {
-	const limit = 4096
-	output := make([]byte, 0, limit+1)
-	leading := true
-	contentEnd := 0
-	needles := make([][]byte, len(patterns))
-	for i, pattern := range patterns {
-		needles[i] = []byte(pattern)
-	}
-	for len(body) > 0 {
-		piece := body[:0]
-		space := false
-		for _, needle := range needles {
-			if bytes.HasPrefix(body, needle) {
-				body = body[len(needle):]
-				piece = []byte("[REDACTED]")
-				break
-			}
-		}
-		if len(piece) == 0 {
-			r, size := utf8.DecodeRune(body)
-			piece, body = body[:size], body[size:]
-			space = unicode.IsSpace(r)
-		}
-		if leading && space {
-			continue
-		}
-		leading = false
-		output = append(output, piece[:min(len(piece), limit+1-len(output))]...)
-		if !space {
-			if len(output) > limit {
-				return string(output[:limit]), true
-			}
-			contentEnd = len(output)
-		}
-	}
-	return string(output[:contentEnd]), false
 }
