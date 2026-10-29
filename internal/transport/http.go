@@ -841,15 +841,28 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 			apiErr.Message = ""
 		}
 	}
+	patterns, safe := c.errorRedactionPatterns(request)
+	if safe {
+		replacements := make([]string, 0, 2*len(patterns))
+		for _, pattern := range patterns {
+			replacements = append(replacements, pattern, "[REDACTED]")
+		}
+		replacer := strings.NewReplacer(replacements...)
+		apiErr.Code = replacer.Replace(apiErr.Code)
+		apiErr.Message = replacer.Replace(apiErr.Message)
+	} else {
+		// Opaque transports may inject credentials we cannot enumerate.
+		apiErr.Code, apiErr.Message = "", ""
+	}
 	if strings.TrimSpace(apiErr.Message) == "" {
 		apiErr.Message = http.StatusText(statusCode)
 		if apiErr.Message == "" {
 			apiErr.Message = "HTTP request failed"
 		}
-		excerpt, truncated, safe := c.redactErrorBody(body, request)
 		if !safe {
 			return apiErr
 		}
+		excerpt, truncated := boundedRedactedExcerpt(body, patterns)
 		if len(excerpt) > 0 {
 			apiErr.Message += fmt.Sprintf(": response body %q", strings.ToValidUTF8(excerpt, "\uFFFD"))
 			if truncated {
@@ -862,10 +875,10 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 	return apiErr
 }
 
-// redactErrorBody fails closed when the transport can supply credentials we
+// errorRedactionPatterns fails closed when the transport can supply credentials we
 // cannot enumerate. Use the response request rather than rereading token files,
 // which may have rotated since the request was sent.
-func (c *Client) redactErrorBody(body []byte, request *http.Request) (excerpt string, truncated, safe bool) {
+func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) {
 	var secrets []string
 	addHeader := func(value string) {
 		secrets = append(secrets, value, strings.TrimSpace(value))
@@ -907,7 +920,7 @@ func (c *Client) redactErrorBody(body []byte, request *http.Request) (excerpt st
 			rt = t.base
 		case *tokenFileRoundTripper:
 			if request == nil {
-				return "", false, false
+				return nil, false
 			}
 			rt = t.base
 		case *http.Transport:
@@ -920,16 +933,15 @@ func (c *Client) redactErrorBody(body []byte, request *http.Request) (excerpt st
 				// JSON providers may reflect an escaped header value.
 				encoded, err := json.Marshal(secret)
 				if err != nil {
-					return "", false, false
+					return nil, false
 				}
 				patterns = append(patterns, string(encoded[1:len(encoded)-1]))
 			}
 			// Prefer full credentials over shorter overlapping components.
 			sort.Slice(patterns, func(i, j int) bool { return len(patterns[i]) > len(patterns[j]) })
-			excerpt, truncated := boundedRedactedExcerpt(body, patterns)
-			return excerpt, truncated, true
+			return patterns, true
 		default:
-			return "", false, false
+			return nil, false
 		}
 	}
 }
@@ -942,12 +954,16 @@ func boundedRedactedExcerpt(body []byte, patterns []string) (string, bool) {
 	output := make([]byte, 0, limit+1)
 	leading := true
 	contentEnd := 0
+	needles := make([][]byte, len(patterns))
+	for i, pattern := range patterns {
+		needles[i] = []byte(pattern)
+	}
 	for len(body) > 0 {
 		piece := body[:0]
 		space := false
-		for _, pattern := range patterns {
-			if bytes.HasPrefix(body, []byte(pattern)) {
-				body = body[len(pattern):]
+		for _, needle := range needles {
+			if bytes.HasPrefix(body, needle) {
+				body = body[len(needle):]
 				piece = []byte("[REDACTED]")
 				break
 			}

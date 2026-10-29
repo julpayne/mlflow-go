@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -101,6 +102,41 @@ func TestErrorBodyRedaction(t *testing.T) {
 			apiErr := client.parseError(http.StatusForbidden, []byte(tt.body), nil).(*internalerrors.APIError)
 			if apiErr.Message != tt.want {
 				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
+			}
+		})
+	}
+}
+
+func TestStructuredErrorRedaction(t *testing.T) {
+	origin, err := url.Parse("https://tracking.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, code, message, wantCode, wantMessage string
+		headers                                    map[string]string
+		rt                                         http.RoundTripper
+		request                                    *http.Request
+	}{
+		{name: "ordinary fields", code: "RESOURCE_NOT_FOUND", message: "  missing resource\n", wantCode: "RESOURCE_NOT_FOUND", wantMessage: "  missing resource\n"},
+		{name: "configured header in both fields", headers: map[string]string{"X-Key": "header-secret"}, code: "header-secret", message: "denied header-secret", wantCode: "[REDACTED]", wantMessage: "denied [REDACTED]"},
+		{name: "escaped header", headers: map[string]string{"X-Key": "secret\"value"}, code: "PERMISSION_DENIED", message: "denied secret\"value", wantCode: "PERMISSION_DENIED", wantMessage: "denied [REDACTED]"},
+		{name: "static bearer", rt: NewTokenRoundTripper(http.DefaultTransport, "bearer-secret", origin), code: "bearer-secret", message: "denied Bearer bearer-secret", wantCode: "[REDACTED]", wantMessage: "denied [REDACTED]"},
+		{name: "basic components", rt: NewTokenRoundTripper(http.DefaultTransport, "alice:password-secret", origin), code: "PERMISSION_DENIED", message: "denied alice:password-secret password-secret", wantCode: "PERMISSION_DENIED", wantMessage: "denied [REDACTED] [REDACTED]"},
+		{name: "explicit request authorization", request: &http.Request{Header: http.Header{"Authorization": {"Bearer caller-secret"}}}, code: "caller-secret", message: "denied caller-secret", wantCode: "[REDACTED]", wantMessage: "denied [REDACTED]"},
+		{name: "token file without request", rt: NewTokenFileRoundTripper(http.DefaultTransport, "unused", origin), code: "unknown-secret", message: "denied unknown-secret", wantMessage: "Forbidden"},
+		{name: "opaque transport", rt: roundTripperFunc(func(*http.Request) (*http.Response, error) { panic("unused") }), code: "unknown-secret", message: "denied unknown-secret", wantMessage: "Forbidden"},
+		{name: "code with empty message", headers: map[string]string{"X-Key": "header-secret"}, code: "header-secret", wantCode: "[REDACTED]", wantMessage: `Forbidden: response body "{\"error_code\":\"[REDACTED]\",\"message\":\"\"}"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]string{"error_code": tt.code, "message": tt.message})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
+			apiErr := client.parseError(http.StatusForbidden, body, tt.request).(*internalerrors.APIError)
+			if apiErr.Code != tt.wantCode || apiErr.Message != tt.wantMessage || apiErr.StatusCode != http.StatusForbidden {
+				t.Fatalf("APIError = %#v, want code %q, message %q, status 403", apiErr, tt.wantCode, tt.wantMessage)
 			}
 		})
 	}
@@ -231,5 +267,36 @@ func TestBoundedRedactedExcerpt(t *testing.T) {
 				t.Fatalf("excerpt mismatch: length %d, truncated %v; want length %d, truncated %v", len(got), gotTruncated, len(want), truncated)
 			}
 		})
+	}
+}
+
+func TestStructuredErrorTokenFileRotation(t *testing.T) {
+	const secret = "original-request-token"
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := os.WriteFile(tokenPath, []byte("rotated-token"), 0600); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error_code": strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
+			"message":    "denied " + r.Header.Get("Authorization"),
+		})
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, TokenPath: tokenPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var apiErr *internalerrors.APIError
+	err = client.Get(context.Background(), "/error", nil, nil)
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %v", err)
+	}
+	if apiErr.Code != "[REDACTED]" || apiErr.Message != "denied [REDACTED]" || strings.Contains(err.Error(), secret) {
+		t.Fatalf("unexpected error: %#v", apiErr)
 	}
 }
