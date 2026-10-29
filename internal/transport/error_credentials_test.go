@@ -79,6 +79,41 @@ func TestErrorCookieCredentials(t *testing.T) {
 	}
 }
 
+func TestGetErrorPreservesTrackingQueryValues(t *testing.T) {
+	for _, name := range []string{"my-prompt", "RESOURCE_DOES_NOT_EXIST"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			query := url.Values{"name": {name}, "max_results": {"1"}}
+			message := fmt.Sprintf("Prompt %q not found after 1 lookup", name)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.RawQuery != query.Encode() {
+					t.Errorf("RawQuery = %q, want %q", r.URL.RawQuery, query.Encode())
+				}
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error_code": "RESOURCE_DOES_NOT_EXIST", "message": message,
+				})
+			}))
+			defer server.Close()
+			client, err := New(Config{BaseURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.Get(context.Background(), "/", query, nil)
+			var apiErr *internalerrors.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected APIError, got %v", err)
+			}
+			if apiErr.Message != message || apiErr.Code != "RESOURCE_DOES_NOT_EXIST" {
+				t.Fatalf("query values changed error fields: %#v", apiErr)
+			}
+			if !internalerrors.IsNotFound(fmt.Errorf("caller: %w", err)) {
+				t.Fatal("expected not-found classification")
+			}
+		})
+	}
+}
+
 func TestAbsoluteErrorQueryCredentials(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		for _, structured := range []bool{false, true} {

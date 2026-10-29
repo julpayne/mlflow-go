@@ -944,8 +944,8 @@ func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) 
 				addHeader(name, value)
 			}
 		}
-		if request.URL != nil {
-			// Unknown query parameters may authenticate presigned storage URLs.
+		if request.URL != nil && (c.baseURL == nil || !strings.EqualFold(request.URL.Host, c.baseURL.Host)) {
+			// Unknown query parameters may authenticate foreign-host presigned storage URLs.
 			// Keep the exact wire spelling as well as decoded/encoded forms.
 			for _, part := range strings.Split(request.URL.RawQuery, "&") {
 				_, raw, ok := strings.Cut(part, "=")

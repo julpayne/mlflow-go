@@ -108,7 +108,8 @@ Define `NotFoundError`, `PermissionError`, etc. as distinct types.
   usable message is absent, the SDK supplies HTTP status text and a quoted,
   redacted response excerpt bounded to 4096 bytes.
 - Redaction covers configured and request credentials, individual cookie values,
-  and query parameter values (including encoded forms). Representation and
+  and query parameter values on foreign hosts (including encoded forms), or when
+  no tracking base URL is available. Representation and
   workspace headers are metadata and are excluded from credential patterns.
 - Opaque custom transports suppress server codes, messages, and excerpts because
   their credentials cannot be enumerated. Custom transports may implement the
