@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/opendatahub-io/mlflow-go/mlflow"
@@ -16,9 +17,12 @@ import (
 func TestWorkspaceLookupAndCreationErrors(t *testing.T) {
 	const notFoundMessage = "Workspace 'new-project' not found in the Kubernetes cluster. Each MLflow workspace maps 1:1 to a namespace."
 	const creationMessage = "Namespace creation is not supported by this provider"
+	var callsMu sync.Mutex
 	var calls []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMu.Lock()
 		calls = append(calls, r.Method+" "+r.URL.Path)
+		callsMu.Unlock()
 		if got := r.Header.Get("X-MLFLOW-WORKSPACE"); got != "" {
 			t.Errorf("workspace management request carried workspace header %q", got)
 		}
@@ -76,6 +80,8 @@ func TestWorkspaceLookupAndCreationErrors(t *testing.T) {
 	assertForbidden(createErr)
 	_, ensureErr := client.Workspaces().EnsureWorkspace(context.Background(), "new-project")
 	assertForbidden(ensureErr)
+	callsMu.Lock()
+	defer callsMu.Unlock()
 	if want := []string{
 		"GET /mlflow/api/3.0/mlflow/workspaces/new-project",
 		"POST /mlflow/api/3.0/mlflow/workspaces",

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -843,11 +845,13 @@ func (c *Client) parseError(statusCode int, body []byte) error {
 			apiErr.Message = "HTTP request failed"
 		}
 		// Proxies and providers can return arbitrary JSON, HTML, or plain text.
-		// Include only a bounded body excerpt, never request/response headers or
-		// credentials from client configuration. Quote it to escape control
-		// characters so an upstream response cannot inject log lines.
+		// Redact the full body before bounding it: truncation can split a secret.
 		const maxErrorBodyExcerpt = 4096
-		excerpt := bytes.TrimSpace(body)
+		redacted, safe := c.redactErrorBody(body)
+		if !safe {
+			return apiErr
+		}
+		excerpt := bytes.TrimSpace([]byte(redacted))
 		if len(excerpt) > 0 {
 			truncated := len(excerpt) > maxErrorBodyExcerpt
 			if truncated {
@@ -862,4 +866,69 @@ func (c *Client) parseError(statusCode int, body []byte) error {
 		}
 	}
 	return apiErr
+}
+
+// redactErrorBody fails closed when the transport can supply credentials we
+// cannot enumerate. In particular, rereading a token file would race rotation
+// and might redact a different token from the one used by the request.
+func (c *Client) redactErrorBody(body []byte) (string, bool) {
+	var secrets []string
+	addHeader := func(value string) {
+		secrets = append(secrets, value, strings.TrimSpace(value))
+		if scheme, credential, ok := strings.Cut(value, " "); ok {
+			if strings.EqualFold(scheme, "Bearer") || strings.EqualFold(scheme, "Basic") {
+				secrets = append(secrets, credential)
+			}
+			if strings.EqualFold(scheme, "Basic") {
+				if decoded, err := base64.StdEncoding.DecodeString(credential); err == nil {
+					secrets = append(secrets, string(decoded))
+					if user, password, ok := strings.Cut(string(decoded), ":"); ok {
+						secrets = append(secrets, user, password)
+					}
+				}
+			}
+		}
+	}
+	for _, value := range c.headers {
+		addHeader(value)
+	}
+	var rt http.RoundTripper
+	if c.httpClient != nil {
+		rt = c.httpClient.Transport
+	}
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	for {
+		switch t := rt.(type) {
+		case *WorkspaceRoundTripper:
+			rt = t.base
+		case *tokenRoundTripper:
+			addHeader(t.authValue)
+			rt = t.base
+		case *http.Transport:
+			var patterns []string
+			for _, secret := range secrets {
+				if secret == "" {
+					continue
+				}
+				patterns = append(patterns, secret)
+				// JSON providers may reflect an escaped header value.
+				encoded, err := json.Marshal(secret)
+				if err != nil {
+					return "", false
+				}
+				patterns = append(patterns, string(encoded[1:len(encoded)-1]))
+			}
+			// Prefer full credentials over shorter overlapping components.
+			sort.Slice(patterns, func(i, j int) bool { return len(patterns[i]) > len(patterns[j]) })
+			replacements := make([]string, 0, 2*len(patterns))
+			for _, pattern := range patterns {
+				replacements = append(replacements, pattern, "[REDACTED]")
+			}
+			return strings.NewReplacer(replacements...).Replace(string(body)), true
+		default:
+			return "", false
+		}
+	}
 }

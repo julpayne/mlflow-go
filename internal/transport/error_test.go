@@ -2,10 +2,12 @@ package transport
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -66,6 +68,37 @@ func TestHTTPErrorBodies(t *testing.T) {
 				if strings.Contains(err.Error(), secret) {
 					t.Errorf("error exposes header secret %q", secret)
 				}
+			}
+		})
+	}
+}
+
+func TestErrorBodyRedaction(t *testing.T) {
+	origin, err := url.Parse("https://tracking.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name    string
+		headers map[string]string
+		rt      http.RoundTripper
+		body    string
+		want    string
+	}{
+		{"configured header", map[string]string{"X-API-Key": "header-secret"}, nil, "denied header-secret", `Forbidden: response body "denied [REDACTED]"`},
+		{"bearer header", map[string]string{"Authorization": "Bearer bearer-secret"}, nil, "denied bearer-secret", `Forbidden: response body "denied [REDACTED]"`},
+		{"static bearer", nil, NewTokenRoundTripper(http.DefaultTransport, "token-secret", origin), "denied token-secret", `Forbidden: response body "denied [REDACTED]"`},
+		{"static basic", nil, NewTokenRoundTripper(http.DefaultTransport, "alice:password-secret", origin), "denied alice:password-secret " + base64.StdEncoding.EncodeToString([]byte("alice:password-secret")) + " password-secret", `Forbidden: response body "denied [REDACTED] [REDACTED] [REDACTED]"`},
+		{"rotating token", nil, NewTokenFileRoundTripper(http.DefaultTransport, "unused-token-file", origin), "denied old-token", "Forbidden"},
+		{"custom transport", nil, roundTripperFunc(func(*http.Request) (*http.Response, error) { panic("unused") }), "denied custom-secret", "Forbidden"},
+		{"JSON escaped header", map[string]string{"X-Key": "secret\"value"}, nil, `{"detail":"secret\"value"}`, `Forbidden: response body "{\"detail\":\"[REDACTED]\"}"`},
+		{"secret crossing limit", map[string]string{"X-Key": "boundary-secret"}, nil, strings.Repeat("x", 4090) + "boundary-secret", "Forbidden: response body " + fmt.Sprintf("%q", strings.Repeat("x", 4090)+"[REDAC") + " (truncated)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
+			apiErr := client.parseError(http.StatusForbidden, []byte(tt.body)).(*internalerrors.APIError)
+			if apiErr.Message != tt.want {
+				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
 			}
 		})
 	}

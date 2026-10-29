@@ -14,6 +14,16 @@ func TestAPIError_Error(t *testing.T) {
 		expected string
 	}{
 		{
+			name:     "control characters with code",
+			err:      &APIError{StatusCode: 403, Code: "DENIED\nforged", Message: "bad\r\n\t\x00\x1b\u0085\u2028\u2029"},
+			expected: `mlflow: DENIED\nforged: bad\r\n\t\x00\x1b\u0085\u2028\u2029 (status 403)`,
+		},
+		{
+			name:     "control characters without code",
+			err:      &APIError{StatusCode: 500, Message: "bad\nentry: café \"quoted\" \\path"},
+			expected: `mlflow: bad\nentry: café "quoted" \path (status 500)`,
+		},
+		{
 			name: "with code",
 			err: &APIError{
 				StatusCode: 404,
@@ -44,9 +54,13 @@ func TestAPIError_Error(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			original := *tt.err
 			got := tt.err.Error()
 			if got != tt.expected {
 				t.Errorf("Error() = %q, want %q", got, tt.expected)
+			}
+			if *tt.err != original {
+				t.Fatal("Error() modified the structured fields")
 			}
 		})
 	}
