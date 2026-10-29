@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -115,5 +117,60 @@ func TestErrorBodyExcerptBound(t *testing.T) {
 	err = client.parseError(599, []byte(strings.Repeat("\x00", 10000)))
 	if len(err.Error()) > 16500 || !strings.Contains(err.Error(), "HTTP request failed") {
 		t.Fatalf("unexpected fallback for unknown status: length %d", len(err.Error()))
+	}
+}
+
+func TestErrorBodyProductionTransports(t *testing.T) {
+	const secret = "production-secret"
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == serverInfoPath {
+			fmt.Fprint(w, `{"workspaces_enabled":true}`)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "denied %s", r.Header.Get("Authorization"))
+	}))
+	defer server.Close()
+	custom := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r = r.Clone(r.Context())
+		r.Header.Set("Authorization", "Bearer "+secret)
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"default", Config{}, `Forbidden: response body "denied"`},
+		{"insecure", Config{Insecure: true}, `Forbidden: response body "denied"`},
+		{"nil client transport", Config{HTTPClient: &http.Client{}}, `Forbidden: response body "denied"`},
+		{"explicit HTTP transport", Config{HTTPClient: server.Client()}, `Forbidden: response body "denied"`},
+		{"workspace", Config{Workspace: "test"}, `Forbidden: response body "denied"`},
+		{"static token", Config{Token: secret}, `Forbidden: response body "denied [REDACTED]"`},
+		{"workspace and static token", Config{Workspace: "test", WorkspacesSupport: true, Token: secret}, `Forbidden: response body "denied [REDACTED]"`},
+		{"token file", Config{TokenPath: tokenPath}, "Forbidden"},
+		{"workspace and token file", Config{Workspace: "test", TokenPath: tokenPath}, "Forbidden"},
+		{"custom transport", Config{HTTPClient: &http.Client{Transport: custom}}, "Forbidden"},
+		{"workspace and custom transport", Config{Workspace: "test", Token: secret, HTTPClient: &http.Client{Transport: custom}}, "Forbidden"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.BaseURL = server.URL
+			client, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var apiErr *internalerrors.APIError
+			if err := client.Get(context.Background(), "/error", nil, nil); !errors.As(err, &apiErr) {
+				t.Fatalf("expected APIError, got %v", err)
+			}
+			if apiErr.Message != tt.want {
+				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
+			}
+		})
 	}
 }
