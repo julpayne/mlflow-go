@@ -98,7 +98,7 @@ func TestErrorBodyRedaction(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
-			apiErr := client.parseError(http.StatusForbidden, []byte(tt.body)).(*internalerrors.APIError)
+			apiErr := client.parseError(http.StatusForbidden, []byte(tt.body), nil).(*internalerrors.APIError)
 			if apiErr.Message != tt.want {
 				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
 			}
@@ -109,12 +109,12 @@ func TestErrorBodyRedaction(t *testing.T) {
 func TestErrorBodyExcerptBound(t *testing.T) {
 	client := &Client{}
 	// The final multi-byte character straddles the byte limit.
-	err := client.parseError(http.StatusForbidden, []byte(strings.Repeat("x", 4095)+strings.Repeat("界", 10000)))
+	err := client.parseError(http.StatusForbidden, []byte(strings.Repeat("x", 4095)+strings.Repeat("界", 10000)), nil)
 	if len(err.Error()) > 4200 || !strings.Contains(err.Error(), "(truncated)") || !utf8.ValidString(err.Error()) {
 		t.Fatalf("fallback must be bounded, marked truncated, and valid UTF-8: length %d", len(err.Error()))
 	}
 	// Quoting can expand each byte by up to four characters, but stays bounded.
-	err = client.parseError(599, []byte(strings.Repeat("\x00", 10000)))
+	err = client.parseError(599, []byte(strings.Repeat("\x00", 10000)), nil)
 	if len(err.Error()) > 16500 || !strings.Contains(err.Error(), "HTTP request failed") {
 		t.Fatalf("unexpected fallback for unknown status: length %d", len(err.Error()))
 	}
@@ -152,8 +152,8 @@ func TestErrorBodyProductionTransports(t *testing.T) {
 		{"workspace", Config{Workspace: "test"}, `Forbidden: response body "denied"`},
 		{"static token", Config{Token: secret}, `Forbidden: response body "denied [REDACTED]"`},
 		{"workspace and static token", Config{Workspace: "test", WorkspacesSupport: true, Token: secret}, `Forbidden: response body "denied [REDACTED]"`},
-		{"token file", Config{TokenPath: tokenPath}, "Forbidden"},
-		{"workspace and token file", Config{Workspace: "test", TokenPath: tokenPath}, "Forbidden"},
+		{"token file", Config{TokenPath: tokenPath}, `Forbidden: response body "denied [REDACTED]"`},
+		{"workspace and token file", Config{Workspace: "test", TokenPath: tokenPath}, `Forbidden: response body "denied [REDACTED]"`},
 		{"custom transport", Config{HTTPClient: &http.Client{Transport: custom}}, "Forbidden"},
 		{"workspace and custom transport", Config{Workspace: "test", Token: secret, HTTPClient: &http.Client{Transport: custom}}, "Forbidden"},
 	} {
@@ -170,6 +170,65 @@ func TestErrorBodyProductionTransports(t *testing.T) {
 			}
 			if apiErr.Message != tt.want {
 				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
+			}
+		})
+	}
+}
+
+func TestErrorBodyTokenFileRotation(t *testing.T) {
+	const secret = "request-token-secret"
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Rotate before parsing the response so rereading the file would miss
+		// the credential reflected by this request.
+		if err := os.WriteFile(tokenPath, []byte("rotated-token"), 0600); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "denied %s", r.Header.Get("Authorization"))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, TokenPath: tokenPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var apiErr *internalerrors.APIError
+	if err := client.Get(context.Background(), "/error", nil, nil); !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %v", err)
+	}
+	if want := `Forbidden: response body "denied [REDACTED]"`; apiErr.Message != want {
+		t.Fatalf("Message = %q, want %q", apiErr.Message, want)
+	}
+}
+
+func TestBoundedRedactedExcerpt(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, secret string
+	}{
+		{"expanding replacements", strings.Repeat("s", 10000), "s"},
+		{"contracting replacements", strings.Repeat(strings.Repeat("s", 100), 10000), strings.Repeat("s", 100)},
+		{"crossing limit", strings.Repeat("x", 4090) + "secret", "secret"},
+		{"leading whitespace in secret", " secret", " secret"},
+		{"trailing whitespace in secret", "secret ", "secret "},
+		{"only whitespace", strings.Repeat("\u2003", 10000), "secret"},
+		{"long trailing whitespace", "denied" + strings.Repeat(" ", 10000), "secret"},
+		{"long trailing Unicode whitespace", "denied" + strings.Repeat("\u2003", 10000), "secret"},
+		{"whitespace before later text", "denied" + strings.Repeat(" ", 10000) + "end", "secret"},
+		{"Unicode boundary", strings.Repeat("界", 10000), "secret"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Compare bounded processing with the full-body reference behavior.
+			want := strings.TrimSpace(strings.ReplaceAll(tt.body, tt.secret, "[REDACTED]"))
+			truncated := len(want) > 4096
+			if truncated {
+				want = want[:4096]
+			}
+			got, gotTruncated := boundedRedactedExcerpt([]byte(tt.body), []string{tt.secret})
+			if got != want || gotTruncated != truncated {
+				t.Fatalf("excerpt mismatch: length %d, truncated %v; want length %d, truncated %v", len(got), gotTruncated, len(want), truncated)
 			}
 		})
 	}

@@ -29,7 +29,7 @@ func escapeControls(value string) string {
 	var result strings.Builder
 	start := 0
 	for i, r := range value {
-		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || r == '\u2028' || r == '\u2029' {
 			result.WriteString(value[start:i])
 			quoted := strconv.Quote(string(r))
 			result.WriteString(quoted[1 : len(quoted)-1])

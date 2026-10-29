@@ -14,6 +14,11 @@ func TestAPIError_Error(t *testing.T) {
 		expected string
 	}{
 		{
+			name:     "bidi controls preserve emoji joiners",
+			err:      &APIError{StatusCode: 403, Code: "DENIED\u202e", Message: "bad\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u2066\u2067\u2068\u2069 👩\u200d💻"},
+			expected: "mlflow: DENIED\\u202e: bad\\u061c\\u200e\\u200f\\u202a\\u202b\\u202c\\u202d\\u2066\\u2067\\u2068\\u2069 👩\u200d💻 (status 403)",
+		},
+		{
 			name:     "control characters with code",
 			err:      &APIError{StatusCode: 403, Code: "DENIED\nforged", Message: "bad\r\n\t\x00\x1b\u0085\u2028\u2029"},
 			expected: `mlflow: DENIED\nforged: bad\r\n\t\x00\x1b\u0085\u2028\u2029 (status 403)`,
