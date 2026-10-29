@@ -900,8 +900,12 @@ func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) 
 		addHeader(value)
 	}
 	if request != nil {
-		for _, value := range request.Header.Values("Authorization") {
-			addHeader(value)
+		// Per-request artifact headers can carry credentials under arbitrary
+		// names, so apply the same conservative policy as configured headers.
+		for _, values := range request.Header {
+			for _, value := range values {
+				addHeader(value)
+			}
 		}
 	}
 	var rt http.RoundTripper

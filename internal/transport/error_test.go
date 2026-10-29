@@ -300,3 +300,91 @@ func TestStructuredErrorTokenFileRotation(t *testing.T) {
 		t.Fatalf("unexpected error: %#v", apiErr)
 	}
 }
+
+func TestAbsoluteErrorRequestHeaderRedaction(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, structured := range []bool{false, true} {
+			t.Run(fmt.Sprintf("streaming=%t/structured=%t", streaming, structured), func(t *testing.T) {
+				t.Parallel()
+				const apiKey = "per-request-api-key"
+				const storageToken = "per-request-storage-token"
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("X-API-Key") != apiKey || r.Header.Get("X-Amz-Security-Token") != storageToken {
+						t.Error("missing per-request credentials")
+					}
+					message := "denied " + r.Header.Get("X-API-Key") + " " + r.Header.Get("X-Amz-Security-Token")
+					w.WriteHeader(http.StatusForbidden)
+					if structured {
+						_ = json.NewEncoder(w).Encode(map[string]string{"error_code": r.Header.Get("X-API-Key"), "message": message})
+					} else {
+						fmt.Fprint(w, message)
+					}
+				}))
+				defer server.Close()
+				// Artifact requests use a different origin from the tracking server.
+				client, err := New(Config{BaseURL: "https://tracking.example"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				headers := map[string]string{"X-API-Key": apiKey, "X-Amz-Security-Token": storageToken}
+				if streaming {
+					body, requestErr := client.DoAbsoluteGetBody(context.Background(), server.URL, headers)
+					if body != nil {
+						body.Close()
+					}
+					err = requestErr
+				} else {
+					_, _, err = client.DoAbsolute(context.Background(), http.MethodGet, server.URL, headers, nil)
+				}
+				var apiErr *internalerrors.APIError
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("expected APIError, got %v", err)
+				}
+				wantCode, wantMessage := "", `Forbidden: response body "denied [REDACTED] [REDACTED]"`
+				if structured {
+					wantCode, wantMessage = "[REDACTED]", "denied [REDACTED] [REDACTED]"
+				}
+				if apiErr.StatusCode != http.StatusForbidden || apiErr.Code != wantCode || apiErr.Message != wantMessage {
+					t.Fatalf("APIError = %#v, want status 403, code %q, message %q", apiErr, wantCode, wantMessage)
+				}
+				for _, secret := range []string{apiKey, storageToken} {
+					if strings.Contains(err.Error(), secret) {
+						t.Errorf("error exposes per-request credential %q", secret)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestOpaqueTransportConflictClassification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"error_code":"RESOURCE_ALREADY_EXISTS","message":"resource exists"}`)
+	}))
+	defer server.Close()
+	client, err := New(Config{
+		BaseURL: server.URL,
+		HTTPClient: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return http.DefaultTransport.RoundTrip(r)
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Get(context.Background(), "/error", nil, nil)
+	var apiErr *internalerrors.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "" || apiErr.Message != "Conflict" {
+		t.Fatalf("unexpected redacted APIError: %#v", apiErr)
+	}
+	wrapped := fmt.Errorf("caller: %w", err)
+	if internalerrors.IsAliasConflict(wrapped) {
+		t.Error("redacted conflict must not be classified as an alias conflict")
+	}
+	if !internalerrors.IsAlreadyExists(wrapped) {
+		t.Error("redaction must preserve status-based already-exists classification")
+	}
+}
