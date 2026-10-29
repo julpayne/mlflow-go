@@ -17,6 +17,16 @@ type APIError struct {
 	RequestID  string
 }
 
+// WithRedactedCode marks a transport error whose code was suppressed. Wrapping
+// keeps APIError's public shape and ordinary code-less conflict behavior intact.
+func WithRedactedCode(err *APIError) error {
+	return &redactedCodeError{APIError: err}
+}
+
+type redactedCodeError struct{ *APIError }
+
+func (e *redactedCodeError) Unwrap() error { return e.APIError }
+
 // Error implements the error interface.
 func (e *APIError) Error() string {
 	if e.Code != "" {
@@ -88,14 +98,18 @@ func IsAlreadyExists(err error) bool {
 }
 
 // IsAliasConflict reports whether err indicates the operation failed
-// because aliases point to the resource (HTTP 409 Conflict with a non-empty
-// code other than RESOURCE_ALREADY_EXISTS). A missing code is treated as unknown.
+// because aliases point to the resource (HTTP 409 Conflict without a
+// RESOURCE_ALREADY_EXISTS code). Transport errors with suppressed codes are unknown.
 // Note: MLflow OSS silently removes aliases on version deletion; this only triggers on Databricks.
 func IsAliasConflict(err error) bool {
+	var redacted *redactedCodeError
+	if errors.As(err, &redacted) {
+		return false
+	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == http.StatusConflict &&
-			apiErr.Code != "" && apiErr.Code != "RESOURCE_ALREADY_EXISTS"
+			apiErr.Code != "RESOURCE_ALREADY_EXISTS"
 	}
 	return false
 }

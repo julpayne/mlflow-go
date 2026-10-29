@@ -24,6 +24,18 @@ import (
 
 const maxResponseBodySize = 100 << 20 // 100 MiB
 
+// ErrorRedactionTransport is an explicit credential-enumeration contract for
+// custom transports. Implementations must enumerate all credentials used by the
+// entire transport chain for this response request, including credentials added
+// to clones or subsequently removed. Return safe=false if enumeration is incomplete
+// or the request is unavailable. Values must be request-scoped and safe for
+// concurrent use; do not reread rotated token files or use a shared last token.
+// Incorrectly returning safe=true can expose credentials in API errors.
+type ErrorRedactionTransport interface {
+	http.RoundTripper
+	ErrorRedactionCredentials(request *http.Request) (credentials []string, safe bool)
+}
+
 // defaultStreamHeaderTimeout is the fallback deadline for the response-header
 // phase of a streaming transfer when the request context carries no deadline. It
 // is deliberately generous: MLflow's mlflow-artifacts proxy fetches the whole
@@ -842,13 +854,16 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 		}
 	}
 	patterns, safe := c.errorRedactionPatterns(request)
+	codeRedacted := !safe
 	if safe {
 		replacements := make([]string, 0, 2*len(patterns))
 		for _, pattern := range patterns {
 			replacements = append(replacements, pattern, "[REDACTED]")
 		}
 		replacer := strings.NewReplacer(replacements...)
-		apiErr.Code = replacer.Replace(apiErr.Code)
+		code := replacer.Replace(apiErr.Code)
+		codeRedacted = code != apiErr.Code
+		apiErr.Code = code
 		apiErr.Message = replacer.Replace(apiErr.Message)
 	} else {
 		// Opaque transports may inject credentials we cannot enumerate.
@@ -860,7 +875,7 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 			apiErr.Message = "HTTP request failed"
 		}
 		if !safe {
-			return apiErr
+			return errors.WithRedactedCode(apiErr)
 		}
 		excerpt, truncated := boundedRedactedExcerpt(body, patterns)
 		if len(excerpt) > 0 {
@@ -872,7 +887,20 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 			apiErr.Message += ": empty response body"
 		}
 	}
+	if codeRedacted {
+		return errors.WithRedactedCode(apiErr)
+	}
 	return apiErr
+}
+
+func nonCredentialHeader(name string) bool {
+	switch http.CanonicalHeaderKey(name) {
+	case "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
+		"Content-Type", "Content-Length", "Content-Encoding", "Content-Language",
+		http.CanonicalHeaderKey(workspaceHeader):
+		return true
+	}
+	return false
 }
 
 // errorRedactionPatterns fails closed when the transport can supply credentials we
@@ -880,8 +908,17 @@ func (c *Client) parseError(statusCode int, body []byte, request *http.Request) 
 // which may have rotated since the request was sent.
 func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) {
 	var secrets []string
-	addHeader := func(value string) {
+	addHeader := func(name, value string) {
+		if nonCredentialHeader(name) {
+			return
+		}
 		secrets = append(secrets, value, strings.TrimSpace(value))
+		if strings.EqualFold(name, "Cookie") {
+			r := &http.Request{Header: http.Header{"Cookie": {value}}}
+			for _, cookie := range r.Cookies() {
+				secrets = append(secrets, cookie.Value)
+			}
+		}
 		if scheme, credential, ok := strings.Cut(value, " "); ok {
 			if strings.EqualFold(scheme, "Bearer") || strings.EqualFold(scheme, "Basic") {
 				secrets = append(secrets, credential)
@@ -896,23 +933,30 @@ func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) 
 			}
 		}
 	}
-	for _, value := range c.headers {
-		addHeader(value)
+	for name, value := range c.headers {
+		addHeader(name, value)
 	}
 	if request != nil {
 		// Per-request artifact headers can carry credentials under arbitrary
 		// names, so apply the same conservative policy as configured headers.
 		for name, values := range request.Header {
-			switch http.CanonicalHeaderKey(name) {
-			case "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
-				"Content-Type", "Content-Length", "Content-Encoding", "Content-Language",
-				http.CanonicalHeaderKey(workspaceHeader):
-				// These headers describe the representation or workspace,
-				// rather than credentials. Unknown headers remain sensitive.
-				continue
-			}
 			for _, value := range values {
-				addHeader(value)
+				addHeader(name, value)
+			}
+		}
+		if request.URL != nil {
+			// Unknown query parameters may authenticate presigned storage URLs.
+			// Keep the exact wire spelling as well as decoded/encoded forms.
+			for _, part := range strings.Split(request.URL.RawQuery, "&") {
+				_, raw, ok := strings.Cut(part, "=")
+				if !ok {
+					continue
+				}
+				value, err := url.QueryUnescape(raw)
+				if err != nil {
+					return nil, false
+				}
+				secrets = append(secrets, raw, value, url.QueryEscape(value), url.PathEscape(value))
 			}
 		}
 	}
@@ -928,7 +972,7 @@ func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) 
 		case *WorkspaceRoundTripper:
 			rt = t.base
 		case *tokenRoundTripper:
-			addHeader(t.authValue)
+			addHeader("Authorization", t.authValue)
 			rt = t.base
 		case *tokenFileRoundTripper:
 			if request == nil {
@@ -936,26 +980,39 @@ func (c *Client) errorRedactionPatterns(request *http.Request) ([]string, bool) 
 			}
 			rt = t.base
 		case *http.Transport:
-			var patterns []string
-			for _, secret := range secrets {
-				if secret == "" {
-					continue
-				}
-				patterns = append(patterns, secret)
-				// JSON providers may reflect an escaped header value.
-				encoded, err := json.Marshal(secret)
-				if err != nil {
-					return nil, false
-				}
-				patterns = append(patterns, string(encoded[1:len(encoded)-1]))
+			return redactionPatterns(secrets)
+		case ErrorRedactionTransport:
+			if request == nil {
+				return nil, false
 			}
-			// Prefer full credentials over shorter overlapping components.
-			sort.Slice(patterns, func(i, j int) bool { return len(patterns[i]) > len(patterns[j]) })
-			return patterns, true
+			credentials, safe := t.ErrorRedactionCredentials(request)
+			if !safe {
+				return nil, false
+			}
+			return redactionPatterns(append(secrets, credentials...))
 		default:
 			return nil, false
 		}
 	}
+}
+
+func redactionPatterns(secrets []string) ([]string, bool) {
+	var patterns []string
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		patterns = append(patterns, secret)
+		// JSON providers may reflect an escaped credential value.
+		encoded, err := json.Marshal(secret)
+		if err != nil {
+			return nil, false
+		}
+		patterns = append(patterns, string(encoded[1:len(encoded)-1]))
+	}
+	// Prefer full credentials over shorter overlapping components.
+	sort.Slice(patterns, func(i, j int) bool { return len(patterns[i]) > len(patterns[j]) })
+	return patterns, true
 }
 
 // boundedRedactedExcerpt matches complete secrets before emitting any bytes and

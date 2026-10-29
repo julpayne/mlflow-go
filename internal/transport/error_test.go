@@ -99,7 +99,10 @@ func TestErrorBodyRedaction(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
-			apiErr := client.parseError(http.StatusForbidden, []byte(tt.body), nil).(*internalerrors.APIError)
+			var apiErr *internalerrors.APIError
+			if err := client.parseError(http.StatusForbidden, []byte(tt.body), nil); !errors.As(err, &apiErr) {
+				t.Fatalf("expected APIError, got %v", err)
+			}
 			if apiErr.Message != tt.want {
 				t.Fatalf("Message = %q, want %q", apiErr.Message, tt.want)
 			}
@@ -134,7 +137,10 @@ func TestStructuredErrorRedaction(t *testing.T) {
 				t.Fatal(err)
 			}
 			client := &Client{headers: tt.headers, httpClient: &http.Client{Transport: tt.rt}}
-			apiErr := client.parseError(http.StatusForbidden, body, tt.request).(*internalerrors.APIError)
+			var apiErr *internalerrors.APIError
+			if err := client.parseError(http.StatusForbidden, body, tt.request); !errors.As(err, &apiErr) {
+				t.Fatalf("expected APIError, got %v", err)
+			}
 			if apiErr.Code != tt.wantCode || apiErr.Message != tt.wantMessage || apiErr.StatusCode != http.StatusForbidden {
 				t.Fatalf("APIError = %#v, want code %q, message %q, status 403", apiErr, tt.wantCode, tt.wantMessage)
 			}
@@ -366,7 +372,7 @@ func TestErrorRequestMetadataPreserved(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// Use lowercase keys too: callers may construct Header directly.
 			request := &http.Request{Header: http.Header{strings.ToLower(name): {"a"}}}
-			client := &Client{}
+			client := &Client{headers: map[string]string{strings.ToLower(name): "a"}}
 			for _, body := range []string{
 				`{"error_code":"ALIAS_CONFLICT","message":"alias application/json"}`,
 				"alias application/json",

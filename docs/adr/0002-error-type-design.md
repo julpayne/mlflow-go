@@ -104,7 +104,25 @@ Define `NotFoundError`, `PermissionError`, etc. as distinct types.
 
 ### Neutral
 
-- Error messages from server are passed through; SDK doesn't translate them
+- Usable server error fields are retained after credential redaction. When a
+  usable message is absent, the SDK supplies HTTP status text and a quoted,
+  redacted response excerpt bounded to 4096 bytes.
+- Redaction covers configured and request credentials, individual cookie values,
+  and query parameter values (including encoded forms). Representation and
+  workspace headers are metadata and are excluded from credential patterns.
+- Opaque custom transports suppress server codes, messages, and excerpts because
+  their credentials cannot be enumerated. Custom transports may implement the
+  public `mlflow.ErrorRedactionTransport` contract to enumerate every credential
+  used by their entire transport chain for each response request. An incomplete
+  enumeration must return `safe=false`; incorrectly declaring it safe can expose
+  credentials. Enumeration must use request-scoped data and support concurrent
+  requests and token rotation.
+- Suppressed codes cannot drive alias-conflict classification or code-based
+  already-exists recovery. Ordinary code-less HTTP 409 errors retain the original
+  alias-conflict behavior; HTTP status-based classification remains available.
+- `APIError.Error()` escapes control and bidirectional-control characters for
+  display without modifying the stored fields. Redaction targets credentials;
+  applications must still treat error details as potentially sensitive server data.
 
 ## References
 

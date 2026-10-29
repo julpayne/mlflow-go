@@ -269,7 +269,7 @@ func TestIsAliasConflict(t *testing.T) {
 		{
 			name:     "APIError with 409 and no code",
 			err:      &APIError{StatusCode: http.StatusConflict, Message: "alias conflict"},
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "APIError with 409 and other code",
@@ -289,6 +289,11 @@ func TestIsAliasConflict(t *testing.T) {
 		{
 			name:     "wrapped APIError with 409 and no code",
 			err:      fmt.Errorf("wrapped: %w", &APIError{StatusCode: http.StatusConflict}),
+			expected: true,
+		},
+		{
+			name:     "wrapped transport error with suppressed code",
+			err:      fmt.Errorf("wrapped: %w", WithRedactedCode(&APIError{StatusCode: http.StatusConflict})),
 			expected: false,
 		},
 		{

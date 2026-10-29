@@ -4,7 +4,19 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/opendatahub-io/mlflow-go/internal/transport"
 )
+
+// ErrorRedactionTransport allows custom HTTP transports to retain sanitized
+// API error details and code-based classification. The implementation must
+// enumerate every credential used by its entire transport chain for the given
+// response request, including credentials injected into clones or later removed.
+// Return safe=false when this cannot be guaranteed or the request is unavailable.
+// Credentials must be request-scoped and safe for concurrent use; never reread
+// rotating token files or use a shared last token. Incorrectly returning
+// safe=true can expose credentials through APIError fields and Error().
+type ErrorRedactionTransport = transport.ErrorRedactionTransport
 
 // options holds the configuration for a Client.
 type options struct {
@@ -53,6 +65,9 @@ func WithHeaders(headers map[string]string) Option {
 // Use this to configure timeouts, TLS, or proxies.
 // When a custom client is provided, WithTimeout is ignored;
 // configure the timeout directly on the provided client.
+// Custom transports suppress server error details unless they implement
+// ErrorRedactionTransport. Implement that contract to retain safely redacted
+// details and code-based classification through wrappers such as tracing middleware.
 func WithHTTPClient(client *http.Client) Option {
 	return func(o *options) {
 		o.httpClient = client
