@@ -19,6 +19,9 @@ func TestHTTPErrorBodies(t *testing.T) {
 		name, body, code, message string
 	}{
 		{"standard MLflow", `{"error_code":"PERMISSION_DENIED","message":"Access denied"}`, "PERMISSION_DENIED", "Access denied"},
+		{"case variant keys", `{"ERROR_CODE":"PERMISSION_DENIED","Message":"Access denied"}`, "PERMISSION_DENIED", "Access denied"},
+		{"case variant invalid code type", `{"Error_Code":403,"MESSAGE":"Access denied"}`, "", "Access denied"},
+		{"case variant invalid message type", `{"Error_Code":"PERMISSION_DENIED","MESSAGE":true}`, "PERMISSION_DENIED", `Forbidden: response body "{\"Error_Code\":\"PERMISSION_DENIED\",\"MESSAGE\":true}"`},
 		{"nonstandard JSON", `{"detail":"Namespace creation is not supported by this provider"}`, "", `Forbidden: response body "{\"detail\":\"Namespace creation is not supported by this provider\"}"`},
 		{"plain text", "Namespace creation is not supported by this provider", "", `Forbidden: response body "Namespace creation is not supported by this provider"`},
 		{"empty", "", "", "Forbidden: empty response body"},

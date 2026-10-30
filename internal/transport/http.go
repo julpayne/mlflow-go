@@ -828,12 +828,15 @@ func (c *Client) parseError(statusCode int, body []byte) error {
 	apiErr := &errors.APIError{StatusCode: statusCode}
 	// Gate on a JSON object, and decode fields independently: a non-string
 	// message must not discard a valid MLflow error code (or vice versa).
-	var fields map[string]json.RawMessage
+	var fields struct {
+		Code    json.RawMessage `json:"error_code"`
+		Message json.RawMessage `json:"message"`
+	}
 	if json.Unmarshal(body, &fields) == nil {
-		if err := json.Unmarshal(fields["error_code"], &apiErr.Code); err != nil {
+		if err := json.Unmarshal(fields.Code, &apiErr.Code); err != nil {
 			apiErr.Code = ""
 		}
-		if err := json.Unmarshal(fields["message"], &apiErr.Message); err != nil {
+		if err := json.Unmarshal(fields.Message, &apiErr.Message); err != nil {
 			apiErr.Message = ""
 		}
 	}
